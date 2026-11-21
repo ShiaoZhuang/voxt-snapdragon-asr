@@ -18,8 +18,27 @@ function Get-Asset($Name, $Expected) {
     if (Test-Path -LiteralPath $file) { Remove-Item -LiteralPath $file }
     $partial = "$file.part"
     Write-Host "Downloading $Name"
-    & curl.exe --fail --location --retry 3 --connect-timeout 20 --continue-at - --output $partial "$baseUrl/$Name"
-    if ($LASTEXITCODE -ne 0) { throw "Download failed for $Name. Run this script again to resume." }
+    $curlLog = [IO.Path]::GetTempFileName()
+    $curlOptions = @('--fail', '--location', '--retry', '3', '--connect-timeout', '20',
+        '--continue-at', '-', '--silent', '--show-error', '--stderr', $curlLog,
+        '--output', $partial, "$baseUrl/$Name")
+    # Inspect curl's status explicitly, including on PowerShell 7.
+    $PSNativeCommandUseErrorActionPreference = $false
+    try {
+        & curl.exe @curlOptions
+        $exitCode = $LASTEXITCODE
+        $details = [IO.File]::ReadAllText($curlLog).Trim()
+        if ($exitCode -in 35, 60 -and $details -match '\bschannel\b' -and
+            $details -match 'CRYPT_E_(NO_REVOCATION_CHECK|REVOCATION_OFFLINE)|0x8009201[23]') {
+            Write-Host 'Windows could not reach the certificate revocation service. Retrying with Schannel best-effort revocation.'
+            & curl.exe --ssl-revoke-best-effort @curlOptions
+            $exitCode = $LASTEXITCODE
+            $details = [IO.File]::ReadAllText($curlLog).Trim()
+        }
+        if ($exitCode -ne 0) { throw "Download failed for $Name (curl $exitCode). $details Run this script again to resume." }
+    } finally {
+        Remove-Item -LiteralPath $curlLog
+    }
     if (!(Test-SHA256 $partial $Expected)) {
         Remove-Item -LiteralPath $partial
         throw "SHA-256 mismatch: $Name. Run this script again to re-download."
