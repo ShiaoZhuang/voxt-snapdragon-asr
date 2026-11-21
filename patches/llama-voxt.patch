@@ -1,0 +1,302 @@
+--- a/tools/server/CMakeLists.txt
++++ b/tools/server/CMakeLists.txt
+@@ -76,3 +76,13 @@
+ 
+ target_link_libraries(${TARGET} PRIVATE llama-server-impl)
+ target_compile_features(${TARGET} PRIVATE cxx_std_17)
++
++if (LLAMA_VOXT_SOURCE)
++    target_include_directories(server-context PRIVATE "${LLAMA_VOXT_SOURCE}")
++    add_executable(qwen3_asr_server "${LLAMA_VOXT_SOURCE}/main.cpp")
++    target_link_libraries(qwen3_asr_server PRIVATE llama-server-impl)
++    target_compile_features(qwen3_asr_server PRIVATE cxx_std_17)
++    if (WIN32)
++        target_link_libraries(qwen3_asr_server PRIVATE shell32)
++    endif()
++endif()
+--- a/tools/mtmd/mtmd-helper.h
++++ b/tools/mtmd/mtmd-helper.h
+@@ -121,6 +121,7 @@
+     int32_t  sample_rate; // audio, at the source rate
+     float    duration;    // audio, video: in seconds, -1 if unknown
+     int32_t  n_frames;    // video: -1 if unknown
++    int32_t audio_channels; // audio: source channel count
+ };
+ typedef struct mtmd_helper_media_meta mtmd_helper_media_meta;
+ 
+--- a/tools/mtmd/mtmd-helper.cpp
++++ b/tools/mtmd/mtmd-helper.cpp
+@@ -941,7 +941,7 @@
+ }
+ 
+ int32_t mtmd_helper_get_media_meta(const unsigned char * buf, size_t len, mtmd_helper_init_opt opt, mtmd_helper_media_meta * out) {
+-    *out = {MTMD_HELPER_MEDIA_TYPE_UNKNOWN, 0, 0, 0, -1.0f, -1};
++    *out = {MTMD_HELPER_MEDIA_TYPE_UNKNOWN, 0, 0, 0, -1.0f, -1, 0};
+ 
+     if (audio_helpers::is_audio_file((const char *) buf, len)) {
+         // zero channels and rate: the source format, so the length comes from the header (or an mp3 frame scan)
+@@ -956,6 +956,7 @@
+         }
+         out->type        = MTMD_HELPER_MEDIA_TYPE_AUDIO;
+         out->sample_rate = (int32_t) dec.outputSampleRate;
++        out->audio_channels = (int32_t) dec.outputChannels;
+         ma_decoder_uninit(&dec);
+         return 0;
+     }
+--- a/tools/server/server-queue.h
++++ b/tools/server/server-queue.h
+@@ -97,7 +97,7 @@
+      * - Call callback_sleeping_state(false)
+      * - Exit sleeping state
+      */
+-    void start_loop(int64_t idle_sleep_ms = -1);
++    void start_loop(int64_t idle_sleep_ms = -1, const std::function<void()> & started = {});
+ 
+     // while waiting for work() to finish, run process_new_tasks on the worker thread
+     // returns once work() is done (may throw exceptions)
+@@ -186,7 +186,7 @@
+ 
+     // same as recv(), but have timeout in seconds
+     // if timeout is reached, nullptr is returned
+-    server_task_result_ptr recv_with_timeout(const std::unordered_set<int> & id_tasks, int timeout);
++    server_task_result_ptr recv_with_timeout(const std::unordered_set<int> & id_tasks, std::chrono::milliseconds timeout);
+ 
+     // single-task version of recv()
+     server_task_result_ptr recv(int id_task);
+@@ -235,7 +235,7 @@
+ 
+     // return nullptr if should_stop() is true before receiving a result
+     // note: if one error is received, it will stop further processing and return error result
+-    server_task_result_ptr next(const std::function<bool()> & should_stop);
++    server_task_result_ptr next(const std::function<bool()> & should_stop, std::chrono::milliseconds timeout = {});
+ 
+     struct batch_response {
+         bool is_terminated = false; // if true, indicates that processing was stopped before all results were received
+--- a/tools/server/server-queue.cpp
++++ b/tools/server/server-queue.cpp
+@@ -280,7 +280,7 @@
+     }
+ }
+ 
+-void server_queue::start_loop(int64_t idle_sleep_ms) {
++void server_queue::start_loop(int64_t idle_sleep_ms, const std::function<void()> & started) {
+     running = true;
+     time_last_task = ggml_time_ms();
+ 
+@@ -290,6 +290,9 @@
+     worker.busy     = false;
+     worker.yielding = false;
+     worker.thread = std::thread([this]() { worker_loop(); });
++    if (started) {
++        started();
++    }
+ 
+     constexpr auto max_wait_time = std::chrono::seconds(1);
+     auto should_sleep = [&]() -> bool {
+@@ -452,8 +455,8 @@
+     // should never reach here
+ }
+ 
+-server_task_result_ptr server_response::recv_with_timeout(const std::unordered_set<int> & id_tasks, int timeout) {
+-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(timeout);
++server_task_result_ptr server_response::recv_with_timeout(const std::unordered_set<int> & id_tasks, std::chrono::milliseconds timeout) {
++    const auto deadline = std::chrono::steady_clock::now() + timeout;
+     while (true) {
+         std::unique_lock<std::mutex> lock(mutex_results);
+ 
+@@ -553,9 +556,12 @@
+ 
+ // return nullptr if should_stop() is true before receiving a result
+ // note: if one error is received, it will stop further processing and return error result
+-server_task_result_ptr server_response_reader::next(const std::function<bool()> & should_stop) {
++server_task_result_ptr server_response_reader::next(const std::function<bool()> & should_stop, std::chrono::milliseconds timeout) {
++    if (timeout.count() <= 0) {
++        timeout = std::chrono::seconds(polling_interval_seconds);
++    }
+     while (true) {
+-        server_task_result_ptr result = queue_results.recv_with_timeout(id_tasks, polling_interval_seconds);
++        server_task_result_ptr result = queue_results.recv_with_timeout(id_tasks, timeout);
+         if (result == nullptr) {
+             // timeout, check stop condition
+             if (should_stop()) {
+--- a/tools/server/server-models.cpp
++++ b/tools/server/server-models.cpp
+@@ -1954,7 +1954,7 @@
+     server_task_result_ptr next(const std::function<bool()> & should_stop) {
+         while (true) {
+             static const int http_polling_seconds = 1; // check should_stop every 1 second
+-            server_task_result_ptr result = queue_results.recv_with_timeout({client_id}, http_polling_seconds);
++            server_task_result_ptr result = queue_results.recv_with_timeout({client_id}, std::chrono::seconds(http_polling_seconds));
+             if (result == nullptr) {
+                 // timeout, check stop condition
+                 if (should_stop()) {
+--- a/tools/server/server-context.h
++++ b/tools/server/server-context.h
+@@ -73,7 +73,7 @@
+     bool load_model(common_params & params);
+ 
+     // this function will block main thread until termination
+-    void start_loop();
++    void start_loop(const std::function<void()> & started = {});
+ 
+     // terminate main loop (will unblock start_loop)
+     void terminate();
+@@ -105,6 +105,7 @@
+     server_routes(const common_params & params, server_context & ctx_server);
+ 
+     void init_routes();
++    server_http_res_ptr voxt_transcriptions(const server_http_req & req, const std::atomic<bool> & stopping);
+ 
+     // note: this is not thread-safe and can only when ctx_http.is_ready is false
+     void update_meta(const server_context & ctx_server) {
+--- a/tools/server/server-task.h
++++ b/tools/server/server-task.h
+@@ -81,6 +81,11 @@
+     bool return_tokens   = false;
+     bool return_progress = false;
+ 
++    bool voxt_final = false;
++    bool voxt_stop_on_loop = false;
++    llama_token voxt_eos = LLAMA_TOKEN_NULL;
++    llama_token voxt_eot = LLAMA_TOKEN_NULL;
++
+     int32_t sse_ping_interval = 30; // seconds between SSE comment pings while the stream stays silent, -1 disables
+ 
+     int32_t n_keep    =  0; // number of tokens to keep from initial prompt
+--- a/tools/server/server-common.h
++++ b/tools/server/server-common.h
+@@ -447,6 +447,11 @@
+     uint64_t n_draft_tokens      = 0;
+     uint64_t n_draft_accepted    = 0;
+     uint64_t n_draft_verif_steps = 0;
++
++    int64_t voxt_draft_microseconds   = 0;
++    int64_t voxt_verify_microseconds  = 0;
++    int64_t voxt_context_microseconds = 0;
++    std::vector<json> voxt_first_rounds;
+ 
+     // these are absolute timestamps (in us)
+     // note: must be signed - they are subtracted before the later ones are set
+--- a/tools/server/server-context.cpp
++++ b/tools/server/server-context.cpp
+@@ -1,4 +1,8 @@
+ #include "server-context.h"
++#include "generation.h"
++#include <charconv>
++#include <cmath>
++#include <cstring>
+ #include <atomic>
+ #include <thread>
+ #include "base64.hpp"
+@@ -2207,7 +2211,17 @@
+             }
+         }
+ 
+-        if (llama_vocab_is_eog(vocab, result.tok)) {
++        const auto & task_params = slot.task->params;
++        const bool terminal = task_params.voxt_final
++            ? result.tok == task_params.voxt_eos || result.tok == task_params.voxt_eot
++            : llama_vocab_is_eog(vocab, result.tok);
++        if (task_params.voxt_stop_on_loop && !terminal && voxt_is_loop(slot.generated_tokens)) {
++            slot.stop = STOP_TYPE_WORD;
++            slot.stopping_word = "voxt_token_loop";
++            slot.has_next_token = false;
++        }
++
++        if (terminal) {
+             slot.stop           = STOP_TYPE_EOS;
+             slot.has_next_token = false;
+ 
+@@ -3879,9 +3893,20 @@
+ 
+         // generate the actual drafts (if any)
+         if (!drafting.empty()) {
++            const bool profile = voxt_profile_enabled() && drafting.size() == 1 &&
++                                 drafting.front()->task->params.voxt_final;
++            int64_t draft_microseconds = 0;
+             queue_tasks.yield_to_queue([&]() {
++                const int64_t start = profile ? ggml_time_us() : 0;
+                 common_speculative_draft(spec.get());
++                if (profile) {
++                    llama_synchronize(ctx_dft);
++                    draft_microseconds = ggml_time_us() - start;
++                }
+             });
++            if (profile) {
++                drafting.front()->stats.voxt_draft_microseconds += draft_microseconds;
++            }
+         }
+ 
+         // make checkpoints if needed
+@@ -4644,11 +4669,22 @@
+ 
+         // yield to the queue, so we can still handle metrics tasks while decoding
+         // note: the sync is done here too, so that the wait is also covered by the yield
++        server_slot * voxt_verify_slot = nullptr;
++        if (voxt_profile_enabled() && slots.size() == 1) {
++            auto & slot = slots.front();
++            if (slot.task && slot.task->params.voxt_final && !slot.spec_i_batch.empty()) {
++                voxt_verify_slot = &slot;
++            }
++        }
+         int ret = 0;
+         queue_tasks.yield_to_queue([&]() {
++            const int64_t start = voxt_verify_slot ? ggml_time_us() : 0;
+             ret = llama_process(ctx_tgt, LLAMA_PROCESS_TYPE_DECODE, batch.view.get());
+             if (ret == 0 && has_output) {
+                 llama_synchronize(ctx_tgt);
++                if (voxt_verify_slot) {
++                    voxt_verify_slot->stats.voxt_verify_microseconds += ggml_time_us() - start;
++                }
+             }
+         });
+ 
+@@ -4711,7 +4747,12 @@
+         if (spec) {
+             bool ok = true;
+             queue_tasks.yield_to_queue([&]() {
++                const int64_t start = voxt_verify_slot ? ggml_time_us() : 0;
+                 ok = common_speculative_process(spec.get(), batch.view);
++                if (voxt_verify_slot && ctx_dft) {
++                    llama_synchronize(ctx_dft);
++                    voxt_verify_slot->stats.voxt_context_microseconds += ggml_time_us() - start;
++                }
+             });
+ 
+             if (!ok) {
+@@ -4953,6 +4994,14 @@
+                     SLT_INF(slot, "accepted %2zu/%2zu draft tokens\n", accepted.size() - 1, n_draft);
+                 }
+ 
++                if (slot.task->params.voxt_final && voxt_trace_enabled() &&
++                    slot.stats.voxt_first_rounds.size() < 3) {
++                    slot.stats.voxt_first_rounds.push_back({
++                        {"anchor", slot.sampled},
++                        {"proposals", slot.spec_draft},
++                        {"verified_prefix_and_next", accepted},
++                    });
++                }
+                 common_speculative_accept(spec.get(), slot.id, accepted.size() - 1);
+ 
+                 slot.spec_draft = std::move(accepted);
+@@ -5156,9 +5205,9 @@
+     return impl->load_model(params);
+ }
+ 
+-void server_context::start_loop() {
++void server_context::start_loop(const std::function<void()> & started) {
+     auto & params = impl->params_base;
+-    impl->queue_tasks.start_loop(params.sleep_idle_seconds * 1000);
++    impl->queue_tasks.start_loop(params.sleep_idle_seconds * 1000, started);
+ }
+ 
+ void server_context::terminate() {
+@@ -5271,6 +5320,8 @@
+ //
+ // server_routes
+ //
++
++#include "transcriptions.inc"
+ 
+ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
+             const server_http_req & req,

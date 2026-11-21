@@ -41,3 +41,9 @@ python3 scripts/probe_transcription.py \
 ```
 
 省略 `--draft` 测 Target-only，加 `--cpu` 测 CPU。探针记录上游命令、服务器日志和 SSE；Voxt 托管、停止规则和完整元数据由移植服务实现。F16 音频塔保留原 mmproj 的 F32 bias、归一化和位置参数。
+
+## Voxt 托管后端和 Windows ARM64
+
+Mac 可用 `scripts/build_voxt_backend.sh` 构建 `qwen3_asr_server`。脚本在独立的上游源码副本中应用 `patches/llama-voxt.patch`。模型目录分别提供 `target.gguf`、`mmproj.gguf`；加载草稿时通过 `--draft-model-path` 传入包含 `draft-4.gguf`、`draft-6.gguf` 或 `draft-8.gguf` 的目录。位数对应 Q4_0、Q6_K 或 Q8_0，首轮的包包含 Q4_0。评测器调用同一 EXE 和 Voxt 现有的 Final 请求。设置 `VOXT_ASR_TRACE=1` 可在 SSE 元数据里采集实际输出 token 及前三轮的候选与验证结果。
+
+在 Mac 上运行 `scripts/win-arm64/build_on_mac.sh` 构建 Windows ARM64 + Adreno OpenCL，再运行 `python3 scripts/win-arm64/package_on_mac.py dist/voxt-snapdragon-veri-1` 组装可拷贝的离线目录。运行目录可含空格。实机命令与回传文件见 [Handoff.MD](Handoff.MD)。
