@@ -66,24 +66,37 @@ $models = (New-Item -ItemType Directory -Path (Join-Path $destinationPath 'model
 $lockPath = Join-Path $PSScriptRoot '../../sources.lock.json'
 $upstream = (Get-Content -Raw -LiteralPath $lockPath | ConvertFrom-Json).gguf_probe
 $upstreamUrl = "https://huggingface.co/$($upstream.repo)/resolve/$($upstream.revision)"
-$projectorName = 'mmproj.gguf'
-$projectorUrl = "$baseUrl/$projectorName"
 $projectorHash = $releaseAssets.'mmproj.gguf'
-$projectorWeights = 'unquantized F16/F32 audio projector'
-if ($ProjectorSource -eq 'HuggingFace') {
-    $projectorName = 'mmproj-Qwen3-ASR-1.7B-bf16.gguf'
-    $projectorUrl = "$upstreamUrl/${projectorName}?download=true"
-    $projectorHash = $upstream.files.$projectorName
-    $projectorWeights = 'upstream BF16/F16/F32 audio projector (alternate Veri 1 configuration)'
-}
 $projector = Join-Path $models 'mmproj.gguf'
 if (!(Test-SHA256 $projector $projectorHash)) {
-    $asset = Get-Asset $projectorName $projectorHash $projectorUrl
-    Move-Item -LiteralPath $asset -Destination $projector -Force
+    if ($ProjectorSource -eq 'HuggingFace') {
+        $name = 'mmproj-Qwen3-ASR-1.7B-bf16.gguf'
+        $sourceHash = $upstream.files.$name
+        $source = $projector
+        if (!(Test-SHA256 $source $sourceHash)) {
+            $source = Get-Asset $name $sourceHash "$upstreamUrl/${name}?download=true"
+        }
+        $toolName = 'veri1-projector-fp16-arm64.exe'
+        $converter = Get-Asset $toolName $releaseAssets.$toolName
+        $converted = Join-Path $downloads ("mmproj-fp16-$([guid]::NewGuid()).part")
+        try {
+            Write-Host 'Converting the Hugging Face BF16 projector to the original Veri 1 FP16.'
+            & $converter $source $converted
+            if ($LASTEXITCODE -ne 0 -or !(Test-SHA256 $converted $projectorHash)) {
+                throw 'The converted projector does not match the original Veri 1 SHA-256.'
+            }
+            Move-Item -LiteralPath $converted -Destination $projector -Force
+        } finally {
+            if (Test-Path -LiteralPath $converted) { Remove-Item -LiteralPath $converted }
+        }
+    } else {
+        $asset = Get-Asset 'mmproj.gguf' $projectorHash
+        Move-Item -LiteralPath $asset -Destination $projector -Force
+    }
 }
 if ($manifest.files.'models/mmproj.gguf' -ne $projectorHash) {
     $manifest.files.'models/mmproj.gguf' = $projectorHash
-    $manifest.weights = "Q8_0 target, $projectorWeights, Q4_0 draft (Q6_K output)"
+    $manifest.weights = 'Q8_0 target, unquantized F16/F32 audio projector, Q4_0 draft (Q6_K output)'
     $manifestPart = "$manifestPath.part"
     [IO.File]::WriteAllText($manifestPart, ($manifest | ConvertTo-Json -Depth 10))
     Move-Item -LiteralPath $manifestPart -Destination $manifestPath -Force

@@ -1,7 +1,7 @@
 # Voxt 骁龙 Windows ARM64 本地 ASR
 status: in-progress
 
-current_handoff: [HANDOFF-20261121-101049-voxt-snapdragon-asr.md](HANDOFF-20261121-101049-voxt-snapdragon-asr.md)
+current_handoff: [HANDOFF-20261121-101831-voxt-snapdragon-asr.md](HANDOFF-20261121-101831-voxt-snapdragon-asr.md)
 
 ## 目标与边界
 保留 Voxt 交互和协议，从干净上游构建 Qwen3-ASR 1.7B + DFlash。旧骁龙原型只提供性能现象参考。
@@ -18,6 +18,6 @@ current_handoff: [HANDOFF-20261121-101049-voxt-snapdragon-asr.md](HANDOFF-202611
 - [ ] 完成 Hexagon Target 验证前向的实机可行性与性能报告。
 - [ ] 验收 Windows 桌面听写与实时接口。
 ## Current State
-可直接从 Hugging Face 下载并加载原版音频编码器。
+Hugging Face 音频塔在骁龙本安装时转换为原 Veri 1 FP16。
 ## 依赖与下一步
-骁龙结果依赖离线实机交接。下一步：在骁龙验证原版 BF16 音频塔的下载、CPU 与 Adreno 快速验收
+骁龙结果依赖离线实机交接。下一步：在骁龙上运行更新后的下载脚本与快速验收

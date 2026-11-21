@@ -63,4 +63,6 @@ cd voxt-snapdragon-asr
 
 如果骁龙本可以访问 Hugging Face，可以用 `fetch_veri1.ps1 -TargetSource HuggingFace` 从上游下载字节相同的 Q8_0 Target。程序包、F16 音频编码器和 Q4 Draft 仍由 GitHub Release 提供。两条路径使用相同 SHA-256，已经校验通过的文件自动复用。未完成的 GitHub 分片和 Hugging Face 下载进度各自保留。
 
-若卡在下载 `mmproj.gguf`，可加 `-ProjectorSource HuggingFace` 直取锁定的上游 BF16 音频编码器，后端直接加载文件。此选项会替换同一安装目录的音频编码器，评测报告将明确标记 BF16 配置。与 `-TargetSource HuggingFace` 可以一起使用。回到原 Veri 1 F16 配置时，省略 `-ProjectorSource`。
+若卡在下载 `mmproj.gguf`，可加 `-ProjectorSource HuggingFace` 取上游 BF16 音频编码器，再使用 Release 中的原生 ARM64 工具在本地一次性转成原 Veri 1 FP16 文件。脚本只有在转换产物的 SHA-256 与原 F16 一致时才安装，推理精度与验收基线保持一致。已下载的原版 BF16 或已安装的 FP16 都可以复用。`-TargetSource HuggingFace` 可同时使用。
+
+转换器源代码在 `tools/projector-fp16`。布局配方包含原文件数据区起点、原 Veri 1 FP16 的 GGUF 元数据头及要转换的 BF16 张量区间。可用 `scripts/win-arm64/make_projector_layout.py` 对照两个同版本 GGUF 重建该配方。
