@@ -2,7 +2,9 @@
 param(
     [string]$Destination,
     [ValidateSet('GitHub', 'HuggingFace')]
-    [string]$TargetSource = 'GitHub'
+    [string]$TargetSource = 'GitHub',
+    [ValidateSet('GitHub', 'HuggingFace')]
+    [string]$ProjectorSource = 'GitHub'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -61,23 +63,43 @@ if (!(Test-Path -LiteralPath $manifestPath)) {
 $manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
 if ($manifest.commit -ne '8da314d34c147e9fd37117e61e77a191f6e34c64') { throw 'Unexpected Veri 1 build manifest' }
 $models = (New-Item -ItemType Directory -Path (Join-Path $destinationPath 'models') -Force).FullName
-foreach ($name in @('draft-4.gguf', 'mmproj.gguf')) {
-    $path = Join-Path $models $name
-    $expected = $manifest.files."models/$name"
-    if (!(Test-SHA256 $path $expected)) {
-        $asset = Get-Asset $name $releaseAssets.$name
-        Move-Item -LiteralPath $asset -Destination $path -Force
-    }
+$lockPath = Join-Path $PSScriptRoot '../../sources.lock.json'
+$upstream = (Get-Content -Raw -LiteralPath $lockPath | ConvertFrom-Json).gguf_probe
+$upstreamUrl = "https://huggingface.co/$($upstream.repo)/resolve/$($upstream.revision)"
+$projectorName = 'mmproj.gguf'
+$projectorUrl = "$baseUrl/$projectorName"
+$projectorHash = $releaseAssets.'mmproj.gguf'
+$projectorWeights = 'unquantized F16/F32 audio projector'
+if ($ProjectorSource -eq 'HuggingFace') {
+    $projectorName = 'mmproj-Qwen3-ASR-1.7B-bf16.gguf'
+    $projectorUrl = "$upstreamUrl/${projectorName}?download=true"
+    $projectorHash = $upstream.files.$projectorName
+    $projectorWeights = 'upstream BF16/F16/F32 audio projector (alternate Veri 1 configuration)'
+}
+$projector = Join-Path $models 'mmproj.gguf'
+if (!(Test-SHA256 $projector $projectorHash)) {
+    $asset = Get-Asset $projectorName $projectorHash $projectorUrl
+    Move-Item -LiteralPath $asset -Destination $projector -Force
+}
+if ($manifest.files.'models/mmproj.gguf' -ne $projectorHash) {
+    $manifest.files.'models/mmproj.gguf' = $projectorHash
+    $manifest.weights = "Q8_0 target, $projectorWeights, Q4_0 draft (Q6_K output)"
+    $manifestPart = "$manifestPath.part"
+    [IO.File]::WriteAllText($manifestPart, ($manifest | ConvertTo-Json -Depth 10))
+    Move-Item -LiteralPath $manifestPart -Destination $manifestPath -Force
+}
+$draft = Join-Path $models 'draft-4.gguf'
+if (!(Test-SHA256 $draft $manifest.files.'models/draft-4.gguf')) {
+    $asset = Get-Asset 'draft-4.gguf' $releaseAssets.'draft-4.gguf'
+    Move-Item -LiteralPath $asset -Destination $draft -Force
 }
 $target = Join-Path $models 'target.gguf'
 $targetHash = $manifest.files.'models/target.gguf'
 if (!(Test-SHA256 $target $targetHash)) {
     if ($TargetSource -eq 'HuggingFace') {
-        $lockPath = Join-Path $PSScriptRoot '../../sources.lock.json'
-        $model = (Get-Content -Raw -LiteralPath $lockPath | ConvertFrom-Json).gguf_probe
         $name = 'Qwen3-ASR-1.7B-Q8_0.gguf'
-        if ($model.files.$name -ne $targetHash) { throw 'Hugging Face Target hash differs from the Veri 1 manifest' }
-        $url = "https://huggingface.co/$($model.repo)/resolve/$($model.revision)/${name}?download=true"
+        if ($upstream.files.$name -ne $targetHash) { throw 'Hugging Face Target hash differs from the Veri 1 manifest' }
+        $url = "$upstreamUrl/${name}?download=true"
         $asset = Get-Asset $name $targetHash $url
         Move-Item -LiteralPath $asset -Destination $target -Force
     } else {

@@ -62,3 +62,5 @@ cd voxt-snapdragon-asr
 快速检查通过后，用同一路径运行 `run_verify.ps1`，省略 `-Quick`。回传输出目录的 `verify_report.md` 和 `verify_stats.json`。
 
 如果骁龙本可以访问 Hugging Face，可以用 `fetch_veri1.ps1 -TargetSource HuggingFace` 从上游下载字节相同的 Q8_0 Target。程序包、F16 音频编码器和 Q4 Draft 仍由 GitHub Release 提供。两条路径使用相同 SHA-256，已经校验通过的文件自动复用。未完成的 GitHub 分片和 Hugging Face 下载进度各自保留。
+
+若卡在下载 `mmproj.gguf`，可加 `-ProjectorSource HuggingFace` 直取锁定的上游 BF16 音频编码器，后端直接加载文件。此选项会替换同一安装目录的音频编码器，评测报告将明确标记 BF16 配置。与 `-TargetSource HuggingFace` 可以一起使用。回到原 Veri 1 F16 配置时，省略 `-ProjectorSource`。
