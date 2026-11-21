@@ -12,6 +12,7 @@ if [[ ! -f "$source_dir/.source-revision" ]]; then
   rm "$tarball"
 fi
 cmake -S "$source_dir" -B build/llama-probe -DCMAKE_BUILD_TYPE=Release \
+  -DLLAMA_BUILD_COMMIT="$revision" -DLLAMA_BUILD_NUMBER=0 \
   -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_TOOLS=ON \
   -DLLAMA_BUILD_SERVER=ON -DLLAMA_BUILD_BORINGSSL=OFF -DLLAMA_OPENSSL=OFF -DLLAMA_BUILD_WEBUI=OFF
-cmake --build build/llama-probe --target llama-server --parallel "${BUILD_JOBS:-6}"
+cmake --build build/llama-probe --target llama-server llama-quantize --parallel "${BUILD_JOBS:-6}"

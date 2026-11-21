@@ -1,0 +1,407 @@
+diff --git a/Voxt/eval_asr_test.go b/Voxt/eval_asr_test.go
+index b8a8759..6b2679e 100644
+--- a/Voxt/eval_asr_test.go
++++ b/Voxt/eval_asr_test.go
+@@ -62,7 +62,11 @@ func TestEvalASR(t *testing.T) {
+ 	clips := e.clips()
+ 	var md strings.Builder
+ 	fmt.Fprintf(&md, "# Speech recognition (%d clips%s)\n\n", len(clips), map[bool]string{true: ", quick", false: ""}[e.quick])
+-	for _, id := range []string{models.ASRAccurate, models.ASRFast} {
++	modelIDs := []string{models.ASRAccurate, models.ASRFast}
++	if only := strings.TrimSpace(os.Getenv("VOXTNEW_EVAL_ASR")); only != "" {
++		modelIDs = strings.Split(only, ",")
++	}
++	for _, id := range modelIDs {
+ 		a, err := omni.NewASR(rt, id, e.dir(t, id))
+ 		if err != nil {
+ 			t.Fatal(err)
+diff --git a/Voxt/internal/omni/final.go b/Voxt/internal/omni/final.go
+index eb97a1d..e1f43b8 100644
+--- a/Voxt/internal/omni/final.go
++++ b/Voxt/internal/omni/final.go
+@@ -38,12 +38,18 @@ type finalRequest struct {
+ 
+ // finalResult is a request's answer.
+ type finalResult struct {
+-	text        string
+-	tokens      int    // generated
+-	language    string // detected (or the hint), "" when none
+-	length      bool   // the budget ended it
+-	windowTexts []string
+-	segments    []struct {
++	text           string
++	tokens         int    // generated
++	language       string // detected (or the hint), "" when none
++	length         bool   // the budget ended it
++	windowTexts    []string
++	verifyRounds   int
++	proposedDraft  int
++	acceptedDraft  int
++	draftMs        float64
++	targetMs       float64
++	draftContextMs float64
++	segments       []struct {
+ 		Start   float64 `json:"start"`
+ 		End     float64 `json:"end"`
+ 		Speaker string  `json:"speaker"`
+@@ -141,6 +147,7 @@ func transcribe(ctx context.Context, l *lease, r finalRequest, stall time.Durati
+ 			if done == nil {
+ 				return finalResult{}, &asr.Error{Kind: asr.KindServer, Provider: Provider, Detail: "the transcription ended before its result", Retryable: true}
+ 			}
++			logDraftStats(l, done)
+ 			return *done, nil
+ 		}
+ 		res, err := parseEvent(payload)
+@@ -167,10 +174,16 @@ func parseEvent(payload string) (*finalResult, error) {
+ 			Text    string  `json:"text"`
+ 		} `json:"segments"`
+ 		Metadata *struct {
+-			Tokens      *int     `json:"generated_token_count"`
+-			Language    *string  `json:"language"`
+-			Finish      string   `json:"finish_reason"`
+-			WindowTexts []string `json:"window_texts"`
++			Tokens         *int     `json:"generated_token_count"`
++			Language       *string  `json:"language"`
++			Finish         string   `json:"finish_reason"`
++			WindowTexts    []string `json:"window_texts"`
++			VerifyRounds   int      `json:"verify_round_count"`
++			ProposedDraft  int      `json:"proposed_draft_token_count"`
++			AcceptedDraft  int      `json:"accepted_draft_token_count"`
++			DraftMs        float64  `json:"draft_ms"`
++			TargetMs       float64  `json:"target_ms"`
++			DraftContextMs float64  `json:"draft_context_ms"`
+ 		} `json:"generation_metadata"`
+ 		Error *struct {
+ 			Type string `json:"type"`
+@@ -189,6 +202,12 @@ func parseEvent(payload string) (*finalResult, error) {
+ 			}
+ 			r.tokens, r.length = *m.Tokens, m.Finish == "length"
+ 			r.windowTexts = m.WindowTexts
++			r.verifyRounds = m.VerifyRounds
++			r.proposedDraft = m.ProposedDraft
++			r.acceptedDraft = m.AcceptedDraft
++			r.draftMs = m.DraftMs
++			r.targetMs = m.TargetMs
++			r.draftContextMs = m.DraftContextMs
+ 			if m.Language != nil {
+ 				r.language = *m.Language
+ 			}
+@@ -204,6 +223,31 @@ func parseEvent(payload string) (*finalResult, error) {
+ 	return nil, nil
+ }
+ 
++// logDraftStats records speculative decoding acceptance length and, when
++// OMNI_DFLASH_PROFILE=1, the draft vs target timing breakdown.
++func logDraftStats(l *lease, r *finalResult) {
++	if r == nil || r.verifyRounds <= 0 {
++		return
++	}
++	avgAccept := float64(r.acceptedDraft) / float64(r.verifyRounds)
++	avgStep := 1.0 + avgAccept
++	rate := 0.0
++	if r.proposedDraft > 0 {
++		rate = 100.0 * float64(r.acceptedDraft) / float64(r.proposedDraft)
++	}
++	msg := fmt.Sprintf("%s: dflash rounds=%d proposed=%d accepted=%d accept_rate=%.1f%% avg_accept=%.2f avg_step=%.2f",
++		l.s.spec.ID, r.verifyRounds, r.proposedDraft, r.acceptedDraft, rate, avgAccept, avgStep)
++	if total := r.draftMs + r.targetMs + r.draftContextMs; total > 0 {
++		msg += fmt.Sprintf(" | draft=%.1fms (%.1f%%) target=%.1fms (%.1f%%) ctx=%.1fms (%.1f%%)",
++			r.draftMs, 100.0*r.draftMs/total,
++			r.targetMs, 100.0*r.targetMs/total,
++			r.draftContextMs, 100.0*r.draftContextMs/total)
++		l.s.rt.logf("warning", "%s", msg)
++		return
++	}
++	l.s.rt.logf("info", "%s", msg)
++}
++
+ // stallOr is a transport error's *asr.Error, killing a stalled server.
+ func stallOr(ctx context.Context, l *lease, stalled bool, err error) error {
+ 	if stalled {
+diff --git a/Voxt/internal/omni/process.go b/Voxt/internal/omni/process.go
+index 9880571..09cc2ac 100644
+--- a/Voxt/internal/omni/process.go
++++ b/Voxt/internal/omni/process.go
+@@ -77,7 +77,14 @@ func spawn(cfg Config, spec Spec, dir, draft string, cacheLimit bool) (*process,
+ 		args = append(args, "--draft-model-path", draft)
+ 		if spec.Kind == kindQwen3ASR {
+ 			// Qwen3-ASR's 8-bit drafts matched bf16 on the eval set (#3874).
+-			args = append(args, "--draft-bits", "8")
++			// VOXTNEW_DRAFT_BITS overrides it for benchmarking (4, 6, 8, or 0 for bf16).
++			bits := "8"
++			if v := strings.TrimSpace(os.Getenv("VOXTNEW_DRAFT_BITS")); v != "" {
++				bits = v
++			}
++			if bits != "0" {
++				args = append(args, "--draft-bits", bits)
++			}
+ 		}
+ 	}
+ 	cmd := exec.Command(bin, args...)
+diff --git a/Voxt/scripts/build-omni.sh b/Voxt/scripts/build-omni.sh
+index 1df6758..c38fbf3 100755
+--- a/Voxt/scripts/build-omni.sh
++++ b/Voxt/scripts/build-omni.sh
+@@ -49,7 +49,10 @@ fi
+   echo "no sglang_omni_mlx/native sources: set OMNI_NATIVE" >&2; exit 1; }
+ NATIVE="$(cd "$NATIVE" && pwd)"
+ 
+-WORK="$ROOT/build/omni"
++WORK="${VOXT_OMNI_BUILD_DIR:-$ROOT/build/omni}"
++if [[ "$WORK" == *" "* ]]; then
++  WORK="/tmp/voxt-omni-build"
++fi
+ mkdir -p "$WORK"
+ if ! command -v uv >/dev/null; then
+   if [[ ! -x "$WORK/tools/bin/uv" ]]; then
+diff --git a/sglang_omni_mlx/native/src/common/asr_service.cpp b/sglang_omni_mlx/native/src/common/asr_service.cpp
+index 0e2dbdf..c46628d 100644
+--- a/sglang_omni_mlx/native/src/common/asr_service.cpp
++++ b/sglang_omni_mlx/native/src/common/asr_service.cpp
+@@ -68,6 +68,14 @@ Json DoneEvent(const TranscriptionResult &result,
+           result.proposed_draft_token_count;
+       event["generation_metadata"]["accepted_draft_token_count"] =
+           result.accepted_draft_token_count;
++      if (result.draft_seconds > 0.0 || result.target_seconds > 0.0) {
++        event["generation_metadata"]["draft_ms"] =
++            result.draft_seconds * 1000.0;
++        event["generation_metadata"]["target_ms"] =
++            result.target_seconds * 1000.0;
++        event["generation_metadata"]["draft_context_ms"] =
++            result.context_seconds * 1000.0;
++      }
+     } else {
+     }
+   } else {
+diff --git a/sglang_omni_mlx/native/src/common/dflash_draft.cpp b/sglang_omni_mlx/native/src/common/dflash_draft.cpp
+index 96ca608..05cdc6e 100644
+--- a/sglang_omni_mlx/native/src/common/dflash_draft.cpp
++++ b/sglang_omni_mlx/native/src/common/dflash_draft.cpp
+@@ -4,8 +4,11 @@
+ #include <algorithm>
+ #include <chrono>
+ #include <cstdint>
++#include <cstdlib>
++#include <cstring>
+ #include <functional>
+ #include <iostream>
++#include <sstream>
+ #include <stdexcept>
+ #include <string>
+ #include <utility>
+@@ -31,6 +34,17 @@ constexpr int kQuantizationGroupSize = 64;
+ // steps.
+ constexpr int kPlainProbeTokenCount = 5;
+ 
++bool DFlashProfileEnabled() {
++  const char *v = std::getenv("OMNI_DFLASH_PROFILE");
++  return v != nullptr && std::strcmp(v, "1") == 0;
++}
++
++std::string DtypeName(mx::Dtype dtype) {
++  std::ostringstream out;
++  out << dtype;
++  return out.str();
++}
++
+ std::string ShapeText(const mx::Shape &shape) {
+   std::string text = "[";
+   for (size_t i = 0; i < shape.size(); ++i) {
+@@ -143,7 +157,27 @@ DFlashDraft::DFlashDraft(LoadedDraft draft, int quantization_bits)
+       aux_layers_(draft.config.at("aux_hidden_state_layer_ids")
+                       .get<std::vector<int>>()),
+       block_size_(draft.config.at("block_size").get<int>()),
+-      mask_token_id_(draft.config.at("mask_token_id").get<int>()) {}
++      mask_token_id_(draft.config.at("mask_token_id").get<int>()) {
++  if (DFlashProfileEnabled()) {
++    const std::string sample = "layers.0.self_attn.q_proj";
++    if (checkpoint_.Has(sample + ".scales")) {
++      const auto &q = checkpoint_.Quantization(sample);
++      std::cerr << "[DFlash dtype] draft linear=" << sample
++                << " quantized bits=" << q.bits
++                << " group_size=" << q.group_size << " mode=" << q.mode
++                << " weight_dtype="
++                << DtypeName(checkpoint_.Weight(sample + ".weight").dtype())
++                << " scales_dtype="
++                << DtypeName(checkpoint_.Weight(sample + ".scales").dtype())
++                << " block_size=" << block_size_ << "\n";
++    } else if (checkpoint_.Has(sample + ".weight")) {
++      std::cerr << "[DFlash dtype] draft linear=" << sample
++                << " unquantized weight_dtype="
++                << DtypeName(checkpoint_.Weight(sample + ".weight").dtype())
++                << " block_size=" << block_size_ << "\n";
++    }
++  }
++}
+ 
+ // note (wilsonzheng0327): the draft's trained sliding window is not enforced:
+ // on a 194 s recording a 1.7B draft trained with a 2,048 window accepts 3.8
+@@ -294,6 +328,10 @@ DraftStatistics DFlashDraft::Decode(
+   }
+   DraftBackoff backoff;
+   DraftStatistics statistics;
++  const bool profile = DFlashProfileEnabled();
++  if (profile) {
++    mx::synchronize();
++  }
+   while (!finished) {
+     if (cancel.load()) {
+       throw GenerationCancelled();
+@@ -306,6 +344,13 @@ DraftStatistics DFlashDraft::Decode(
+         ProposeBlock(target.EmbedTokens(mx::array(block_ids.data(),
+                                                   {1, block_size_}, mx::int32)),
+                      draft_caches);
++    std::chrono::steady_clock::time_point after_draft;
++    if (profile) {
++      mx::eval({proposed_ids});
++      after_draft = std::chrono::steady_clock::now();
++      statistics.draft_seconds +=
++          std::chrono::duration<double>(after_draft - round_started).count();
++    }
+     // note (wilsonzheng0327): the block is cut to the tokens the budget still
+     // allows, so the caches never hold a position plain decoding would not
+     // have reached.
+@@ -320,7 +365,14 @@ DraftStatistics DFlashDraft::Decode(
+         target.EmbedTokens(mx::reshape(verify_ids, {1, verify_count})), caches,
+         aux_layers_, &aux_hidden_states);
+     const mx::array predictions = mx::argmax(target.Logits(hidden), -1);
+-    mx::eval({proposed_ids, predictions});
++    if (profile) {
++      mx::eval({predictions});
++      const auto after_target = std::chrono::steady_clock::now();
++      statistics.target_seconds +=
++          std::chrono::duration<double>(after_target - after_draft).count();
++    } else {
++      mx::eval({proposed_ids, predictions});
++    }
+     // note (wilsonzheng0327): prediction i follows block token i, so proposal
+     // i is accepted while every earlier one was and it matches prediction i;
+     // the prediction after the last accepted token is committed as well.
+@@ -348,7 +400,24 @@ DraftStatistics DFlashDraft::Decode(
+     for (KVCache &cache : caches) {
+       cache.Trim(verify_count - 1 - accepted_count);
+     }
+-    AppendContext(aux_hidden_states, accepted_count + 1, draft_caches);
++    if (profile) {
++      const auto ctx_started = std::chrono::steady_clock::now();
++      AppendContext(aux_hidden_states, accepted_count + 1, draft_caches);
++      std::vector<mx::array> ctx_arrays;
++      for (const KVCache &cache : draft_caches) {
++        const auto arrays = cache.Arrays();
++        ctx_arrays.insert(ctx_arrays.end(), arrays.begin(), arrays.end());
++      }
++      if (!ctx_arrays.empty()) {
++        mx::eval(ctx_arrays);
++      }
++      statistics.context_seconds +=
++          std::chrono::duration<double>(std::chrono::steady_clock::now() -
++                                        ctx_started)
++              .count();
++    } else {
++      AppendContext(aux_hidden_states, accepted_count + 1, draft_caches);
++    }
+     if (policy == DraftPolicy::kFixed || finished) {
+       continue;
+     } else {
+diff --git a/sglang_omni_mlx/native/src/common/dflash_draft.h b/sglang_omni_mlx/native/src/common/dflash_draft.h
+index ef6033d..d3e5ae4 100644
+--- a/sglang_omni_mlx/native/src/common/dflash_draft.h
++++ b/sglang_omni_mlx/native/src/common/dflash_draft.h
+@@ -29,6 +29,9 @@ struct DraftStatistics {
+   int verify_round_count = 0;
+   int proposed_token_count = 0;
+   int accepted_token_count = 0;
++  double draft_seconds = 0.0;
++  double target_seconds = 0.0;
++  double context_seconds = 0.0;
+ };
+ 
+ class DFlashDraft {
+diff --git a/sglang_omni_mlx/native/src/common/transcription.h b/sglang_omni_mlx/native/src/common/transcription.h
+index 6c08bd1..9b94c4c 100644
+--- a/sglang_omni_mlx/native/src/common/transcription.h
++++ b/sglang_omni_mlx/native/src/common/transcription.h
+@@ -38,6 +38,11 @@ struct TranscriptionResult {
+   int accepted_draft_token_count = 0;
+   // Ordered text of each window in a multi-window Whisper request.
+   std::vector<std::string> window_texts;
++  // Optional DFlash profiling timings (seconds), populated when
++  // OMNI_DFLASH_PROFILE=1.
++  double draft_seconds = 0.0;
++  double target_seconds = 0.0;
++  double context_seconds = 0.0;
+ };
+ 
+ // Segments as the HTTP and realtime APIs send them: start, end, speaker, text,
+diff --git a/sglang_omni_mlx/native/src/qwen3_asr/qwen3_asr_model.cpp b/sglang_omni_mlx/native/src/qwen3_asr/qwen3_asr_model.cpp
+index 5a2d963..d286f5b 100644
+--- a/sglang_omni_mlx/native/src/qwen3_asr/qwen3_asr_model.cpp
++++ b/sglang_omni_mlx/native/src/qwen3_asr/qwen3_asr_model.cpp
+@@ -4,8 +4,12 @@
+ 
+ #include <algorithm>
+ #include <cmath>
++#include <cstdlib>
++#include <cstring>
++#include <iostream>
+ #include <map>
+ #include <set>
++#include <sstream>
+ #include <stdexcept>
+ #include <vector>
+ 
+@@ -69,6 +73,37 @@ Qwen3ASR::Qwen3ASR(const nlohmann::json &config,
+             audio.at("d_model").get<int>(),
+             audio.at("n_window").get<int>(),
+             audio.at("n_window_infer").get<int>()};
++  if (const char *v = std::getenv("OMNI_DFLASH_PROFILE");
++      v != nullptr && std::strcmp(v, "1") == 0) {
++    const auto dtype_of = [](mx::Dtype d) {
++      std::ostringstream out;
++      out << d;
++      return out.str();
++    };
++    const auto log_layer = [&](const std::string &tag,
++                               const std::string &prefix) {
++      if (checkpoint_.Has(prefix + ".scales")) {
++        const auto &q = checkpoint_.Quantization(prefix);
++        std::cerr << "[Target dtype] " << tag << " (" << prefix
++                  << ") quantized bits=" << q.bits
++                  << " group_size=" << q.group_size << " mode=" << q.mode
++                  << " weight_dtype="
++                  << dtype_of(checkpoint_.Weight(prefix + ".weight").dtype())
++                  << " scales_dtype="
++                  << dtype_of(checkpoint_.Weight(prefix + ".scales").dtype())
++                  << "\n";
++      } else if (checkpoint_.Has(prefix + ".weight")) {
++        std::cerr << "[Target dtype] " << tag << " (" << prefix
++                  << ") unquantized weight_dtype="
++                  << dtype_of(checkpoint_.Weight(prefix + ".weight").dtype())
++                  << "\n";
++      }
++    };
++    log_layer("audio_conv2d", "audio_tower.conv2d1");
++    log_layer("audio_linear", "audio_tower.layers.0.self_attn.q_proj");
++    log_layer("decoder_embed", "model.embed_tokens");
++    log_layer("decoder_linear", "model.layers.0.self_attn.q_proj");
++  }
+ }
+ 
+ mx::array Qwen3ASR::Conv2d(const mx::array &x,
+diff --git a/sglang_omni_mlx/native/src/qwen3_asr/qwen3_asr_transcriber.cpp b/sglang_omni_mlx/native/src/qwen3_asr/qwen3_asr_transcriber.cpp
+index 66269b5..4e1e10a 100644
+--- a/sglang_omni_mlx/native/src/qwen3_asr/qwen3_asr_transcriber.cpp
++++ b/sglang_omni_mlx/native/src/qwen3_asr/qwen3_asr_transcriber.cpp
+@@ -442,7 +442,11 @@ TranscriptionResult Qwen3ASRTranscriber::FinishedResult(
+           {},
+           draft_statistics.verify_round_count,
+           draft_statistics.proposed_token_count,
+-          draft_statistics.accepted_token_count};
++          draft_statistics.accepted_token_count,
++          {},
++          draft_statistics.draft_seconds,
++          draft_statistics.target_seconds,
++          draft_statistics.context_seconds};
+ }
+ 
+ struct Qwen3ASRTranscriber::BatchRow {
