@@ -1,5 +1,9 @@
 [CmdletBinding()]
-param([string]$Destination)
+param(
+    [string]$Destination,
+    [ValidateSet('GitHub', 'HuggingFace')]
+    [string]$TargetSource = 'GitHub'
+)
 
 $ErrorActionPreference = 'Stop'
 if (!$Destination) { $Destination = Join-Path $PSScriptRoot '../../dist/voxt-snapdragon-veri-1' }
@@ -12,7 +16,7 @@ function Test-SHA256($Path, $Expected) {
            ((Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() -eq $Expected)
 }
 
-function Get-Asset($Name, $Expected) {
+function Get-Asset($Name, $Expected, $Url = "$baseUrl/$Name") {
     $file = Join-Path $downloads $Name
     if (Test-SHA256 $file $Expected) { return $file }
     if (Test-Path -LiteralPath $file) { Remove-Item -LiteralPath $file }
@@ -21,7 +25,7 @@ function Get-Asset($Name, $Expected) {
     $curlLog = [IO.Path]::GetTempFileName()
     $curlOptions = @('--fail', '--location', '--retry', '3', '--connect-timeout', '20',
         '--continue-at', '-', '--silent', '--show-error', '--stderr', $curlLog,
-        '--output', $partial, "$baseUrl/$Name")
+        '--output', $partial, $Url)
     # Inspect curl's status explicitly, including on PowerShell 7.
     $PSNativeCommandUseErrorActionPreference = $false
     try {
@@ -68,33 +72,43 @@ foreach ($name in @('draft-4.gguf', 'mmproj.gguf')) {
 $target = Join-Path $models 'target.gguf'
 $targetHash = $manifest.files.'models/target.gguf'
 if (!(Test-SHA256 $target $targetHash)) {
-    $assembly = "$target.part"
-    $parts = @('target.gguf.part1', 'target.gguf.part2', 'target.gguf.part3')
-    $completeSizes = @(0L, 805306368L, 1610612736L, 2165034944L)
-    $size = if (Test-Path -LiteralPath $assembly) { (Get-Item -LiteralPath $assembly).Length } else { 0 }
-    if ($size -notin $completeSizes) {
-        $size = [long]$size
-        if ($size -gt 2165034944) { $size = 0 }
-        $size = [long]([math]::Floor($size / 805306368.0) * 805306368)
-        $truncate = [IO.File]::Open($assembly, 'OpenOrCreate', 'Write')
-        try { $truncate.SetLength($size) } finally { $truncate.Dispose() }
+    if ($TargetSource -eq 'HuggingFace') {
+        $lockPath = Join-Path $PSScriptRoot '../../sources.lock.json'
+        $model = (Get-Content -Raw -LiteralPath $lockPath | ConvertFrom-Json).gguf_probe
+        $name = 'Qwen3-ASR-1.7B-Q8_0.gguf'
+        if ($model.files.$name -ne $targetHash) { throw 'Hugging Face Target hash differs from the Veri 1 manifest' }
+        $url = "https://huggingface.co/$($model.repo)/resolve/$($model.revision)/${name}?download=true"
+        $asset = Get-Asset $name $targetHash $url
+        Move-Item -LiteralPath $asset -Destination $target -Force
+    } else {
+        $assembly = "$target.part"
+        $parts = @('target.gguf.part1', 'target.gguf.part2', 'target.gguf.part3')
+        $completeSizes = @(0L, 805306368L, 1610612736L, 2165034944L)
+        $size = if (Test-Path -LiteralPath $assembly) { (Get-Item -LiteralPath $assembly).Length } else { 0 }
+        if ($size -notin $completeSizes) {
+            $size = [long]$size
+            if ($size -gt 2165034944) { $size = 0 }
+            $size = [long]([math]::Floor($size / 805306368.0) * 805306368)
+            $truncate = [IO.File]::Open($assembly, 'OpenOrCreate', 'Write')
+            try { $truncate.SetLength($size) } finally { $truncate.Dispose() }
+        }
+        $startPart = if ($size -eq 2165034944) { 3 } else { [int]($size / 805306368L) }
+        for ($i = $startPart; $i -lt $parts.Count; $i++) {
+            $name = $parts[$i]
+            $asset = Get-Asset $name $releaseAssets.$name
+            $partStream = [IO.File]::OpenRead($asset)
+            try {
+                $output = [IO.File]::Open($assembly, 'Append', 'Write')
+                try { $partStream.CopyTo($output) } finally { $output.Dispose() }
+            } finally { $partStream.Dispose() }
+            Remove-Item -LiteralPath $asset
+        }
+        if (!(Test-SHA256 $assembly $targetHash)) {
+            Remove-Item -LiteralPath $assembly
+            throw 'SHA-256 mismatch for assembled target.gguf. Run this script again to re-download.'
+        }
+        Move-Item -LiteralPath $assembly -Destination $target -Force
     }
-    $startPart = if ($size -eq 2165034944) { 3 } else { [int]($size / 805306368L) }
-    for ($i = $startPart; $i -lt $parts.Count; $i++) {
-        $name = $parts[$i]
-        $asset = Get-Asset $name $releaseAssets.$name
-        $partStream = [IO.File]::OpenRead($asset)
-        try {
-            $output = [IO.File]::Open($assembly, 'Append', 'Write')
-            try { $partStream.CopyTo($output) } finally { $output.Dispose() }
-        } finally { $partStream.Dispose() }
-        Remove-Item -LiteralPath $asset
-    }
-    if (!(Test-SHA256 $assembly $targetHash)) {
-        Remove-Item -LiteralPath $assembly
-        throw 'SHA-256 mismatch for assembled target.gguf. Run this script again to re-download.'
-    }
-    Move-Item -LiteralPath $assembly -Destination $target -Force
 }
 
 Write-Output "Veri 1 is ready: $destinationPath"
