@@ -1,8 +1,15 @@
 [CmdletBinding()]
-param([switch]$Quick, [string]$OutputDirectory)
+param([switch]$Quick, [string]$OutputDirectory, [string]$InstallDirectory)
 
 $ErrorActionPreference = 'Stop'
-$root = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
+$scriptRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '../..')).Path
+if (!$InstallDirectory) {
+    $InstallDirectory = $scriptRoot
+    if (!(Test-Path -LiteralPath (Join-Path $scriptRoot 'verify_manifest.json') -PathType Leaf)) {
+        $InstallDirectory = Join-Path $scriptRoot 'dist/voxt-snapdragon-veri-1'
+    }
+}
+$root = (Resolve-Path -LiteralPath $InstallDirectory).Path
 if (!$OutputDirectory) {
     $OutputDirectory = Join-Path $root ("verify-" + (Get-Date -Format 'yyyyMMdd-HHmmss-fff'))
 }
@@ -63,9 +70,12 @@ function Get-RunTotals($Rows) {
 }
 
 try {
-    $osArch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+    # An emulated PowerShell process can report its own architecture.
+    $osArch = $env:PROCESSOR_ARCHITEW6432
+    if (!$osArch) { $osArch = $env:PROCESSOR_ARCHITECTURE }
+    if (!$osArch) { throw 'Unable to determine Windows architecture from PROCESSOR_ARCHITECTURE or PROCESSOR_ARCHITEW6432.' }
     $report.Add("OS architecture: $osArch")
-    if ($osArch -ne 'Arm64') { throw "Expected native Windows ARM64, found $osArch" }
+    if ($osArch -ne 'ARM64') { throw "Expected Windows ARM64, found $osArch" }
     $manifest = Get-Content -Raw -LiteralPath (Join-Path $root 'verify_manifest.json') | ConvertFrom-Json
     $report.Add("Build source: $($manifest.commit)")
     $report.Add("llama.cpp source: $($manifest.llama_cpp)")
