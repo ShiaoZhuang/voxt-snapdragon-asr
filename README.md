@@ -56,13 +56,18 @@ Mac 可用 `scripts/build_voxt_backend.sh` 构建 `qwen3_asr_server`。脚本在
 git clone https://github.com/ShiaoZhuang/voxt-snapdragon-asr.git
 cd voxt-snapdragon-asr
 .\scripts\win-arm64\fetch_veri1.ps1
-.\dist\voxt-snapdragon-veri-1\scripts\win-arm64\run_verify.ps1 -Quick
+.\scripts\win-arm64\run_verify.ps1 -Quick
 ```
 
-快速检查通过后，用同一路径运行 `run_verify.ps1`，省略 `-Quick`。回传输出目录的 `verify_report.md` 和 `verify_stats.json`。
+快速检查通过后，用同一路径运行 `run_verify.ps1`，省略 `-Quick`。 已安装 Veri 1 时，`git pull --ff-only` 后可从仓库脚本直接复用原安装。自定义安装目录可通过 `-InstallDirectory` 指定。回传输出目录的 `verify_report.md` 和 `verify_stats.json`。
 
 如果骁龙本可以访问 Hugging Face，可以用 `fetch_veri1.ps1 -TargetSource HuggingFace` 从上游下载字节相同的 Q8_0 Target。程序包、F16 音频编码器和 Q4 Draft 仍由 GitHub Release 提供。两条路径使用相同 SHA-256，已经校验通过的文件自动复用。未完成的 GitHub 分片和 Hugging Face 下载进度各自保留。
 
 若卡在下载 `mmproj.gguf`，可加 `-ProjectorSource HuggingFace` 取上游 BF16 音频编码器，再使用 Release 中的原生 ARM64 工具在本地一次性转成原 Veri 1 FP16 文件。脚本只有在转换产物的 SHA-256 与原 F16 一致时才安装，推理精度与验收基线保持一致。已下载的原版 BF16 或已安装的 FP16 都可以复用。`-TargetSource HuggingFace` 可同时使用。
 
 转换器源代码在 `tools/projector-fp16`。布局配方包含原文件数据区起点、原 Veri 1 FP16 的 GGUF 元数据头及要转换的 BF16 张量区间。可用 `scripts/win-arm64/make_projector_layout.py` 对照两个同版本 GGUF 重建该配方。
+
+
+## 提交与实机迭代
+
+小步修复在专题分支上提交，通过同一个 GitHub PR 交给实机验证。需要连续试错时，可以单独检出该分支。一个主题通过后用 Squash and merge 合入 `main`，PR 保留分支的提交、讨论和结果。`Veri:` 留给正式交接版本。已经公开的提交和验收 tag 继续作为原交付的定位点。

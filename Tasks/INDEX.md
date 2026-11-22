@@ -1,16 +1,17 @@
 # 晓龙 ASR 任务索引
-Last updated: 2026-11-21 10:18:31 US/Pacific
+Last updated: 2026-11-21 20:26:53 US/Pacific
 
 ## 项目与文档
 Voxt Windows ARM64 本地听写。[项目计划](../PLAN.md) · [跟踪协议](README.md)
 ## Active Tasks
-- [Voxt 骁龙本地 ASR](TASK-20261121-voxt-snapdragon-asr.md) — in-progress，Hugging Face 音频塔在骁龙本安装时转换为原 Veri 1 FP16。
+- [Voxt 骁龙本地 ASR](TASK-20261121-voxt-snapdragon-asr.md) — in-progress，修复 PowerShell 5.1 的 ARM64 检查并通过分支发布。
 ## Source Checkpoint
-- 移植项目：main @ 72dad6314942ab57e1bc46fc63fbe5bca2dc0726（写入本轮检查点前）。
+- 移植项目：fix/veri1-powershell51-arm64 @ 117085b929413f899fa1f5d5dd05a3d8ec97f8c7（写入本轮检查点前）。
 - sglang-omni：feat/dflash-profile-benchmark @ 6efb1212b6e1196ed1140040d9e4e3069f6cb0a8，Capture.swift 有已有修改。
 ## Latest checkpoint
-[HANDOFF-20261121-101831-voxt-snapdragon-asr.md](HANDOFF-20261121-101831-voxt-snapdragon-asr.md)
+[HANDOFF-20261121-202653-voxt-snapdragon-asr.md](HANDOFF-20261121-202653-voxt-snapdragon-asr.md)
 ## Handoff Registry
+- [HANDOFF-20261121-202653-voxt-snapdragon-asr.md](HANDOFF-20261121-202653-voxt-snapdragon-asr.md) → [Voxt 骁龙本地 ASR](TASK-20261121-voxt-snapdragon-asr.md)
 - [HANDOFF-20261121-101831-voxt-snapdragon-asr.md](HANDOFF-20261121-101831-voxt-snapdragon-asr.md) → [Voxt 骁龙本地 ASR](TASK-20261121-voxt-snapdragon-asr.md)
 - [HANDOFF-20261121-101049-voxt-snapdragon-asr.md](HANDOFF-20261121-101049-voxt-snapdragon-asr.md) → [Voxt 骁龙本地 ASR](TASK-20261121-voxt-snapdragon-asr.md)
 - [HANDOFF-20261121-100857-voxt-snapdragon-asr.md](HANDOFF-20261121-100857-voxt-snapdragon-asr.md) → [Voxt 骁龙本地 ASR](TASK-20261121-voxt-snapdragon-asr.md)
