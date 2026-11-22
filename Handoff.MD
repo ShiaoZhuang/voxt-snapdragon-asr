@@ -1,5 +1,17 @@
 # Veri 1 骁龙实机验收
 
+## 排查 OpenCL 启动崩溃
+
+如果 CPU 快测通过，但 OpenCL 在读取 `target.gguf` 后以 `0xC0000005` 退出，在源码仓库根目录运行：
+
+```powershell
+.\scripts\win-arm64\probe_opencl_startup.ps1
+```
+
+探针复用 `dist\voxt-snapdragon-veri-1` 中已安装的运行时和模型，可用 `-InstallDirectory` 指定其他位置。它仅启动一次 OpenCL Target，记录完整 stderr、退出码和过去两天相关的 Windows 应用崩溃事件。把 `Report saved to:` 指向的文本文件发回即可。整个探针无需下载文件或跑评测集。
+
+## 运行验收
+
 在 Windows 11 ARM64 的骁龙 X Elite 笔记本上验证 Voxt 本地转录后端。整个交接目录含原生 EXE、OpenCL loader、模型和公开评测集。需要系统已有 Qualcomm Adreno OpenCL 驱动。目录中的 `verify_manifest.json` 记录准确源码版本和各文件的 SHA-256。
 
 1. 将整个 Veri 1 目录复制到骁龙本并在其根目录打开 PowerShell。
