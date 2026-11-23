@@ -15,7 +15,7 @@ git switch --detach veri-1-auto-handoff
 .\scripts\win-arm64\update_and_verify.ps1
 ```
 
-启动脚本从本仓库的 `veri/native-win-arm64` 分支同步最新提交到专用工作目录，再运行该提交指定的验证任务。当前任务是 Voxt 31 条全量评测，分别执行 Oryon CPU 和 Adreno OpenCL 的 Target-only 与 Q4 DFlash。脚本使用本机已安装的 Go 1.27.1+ 编译 Voxt 评测器，复用已有模型和评测音频。如果模型在自定义目录，运行时加 `-InstallDirectory`。[Go 官方下载](https://go.dev/dl/)
+启动脚本从本仓库的 `veri/native-win-arm64` 分支同步最新提交到专用工作目录，再运行该提交指定的验证任务。当前任务是 Adreno OpenCL 的 Target-only 与 Q4 DFlash 各跑 Voxt 31 条。CPU 基线沿用 `veri-1-windows-full` 的结果。脚本使用本机已安装的 Go 1.27.1+ 编译 Voxt 评测器，复用已有模型和评测音频。如果模型在自定义目录，运行时加 `-InstallDirectory`。[Go 官方下载](https://go.dev/dl/)
 
 结束后拍屏幕上的 **VOXT SNAPDRAGON REPORT** 整段，包含提交、通过状态、关键错误和日志位置。完整输出、探针报告和文本摘要保存在 `Logs:` 指向的目录。
 
@@ -34,10 +34,10 @@ git switch --detach veri-1-auto-handoff
 
 ```powershell
 .\scripts\win-arm64\build_native.ps1
-.\scripts\win-arm64\run_verify.ps1 -NativeBuildDirectory .\build\win-arm64-native -Quick
+.\scripts\win-arm64\run_verify.ps1 -NativeBuildDirectory .\build\win-arm64-native -OpenCLOnly -Quick
 ```
 
-构建在骁龙本生成后端、OpenCL loader 和评测器。继续使用 `dist\voxt-snapdragon-veri-1` 的现有模型、评测集和资产清单。若资产在其他目录，用 `-InstallDirectory` 指向该目录。复验通过条件为四组快测 PASS，OpenCL DFlash 有候选被接收并与同设备的 Target-only 逐 token 一致。
+构建在骁龙本生成后端、OpenCL loader 和评测器。继续使用 `dist\voxt-snapdragon-veri-1` 的现有模型、评测集和资产清单。若资产在其他目录，用 `-InstallDirectory` 指向该目录。复验通过条件为两组 OpenCL 快测 PASS，DFlash 有候选被接收并与 Target-only 逐 token 一致。需要复测 CPU 时，可单独调用 `run_verify.ps1` 并省略 `-OpenCLOnly`。
 
 回传 `Results:` 目录内的 `verify_report.md` 和 `verify_stats.json`。若构建失败，回传第一条工具错误及其上下文。若公司策略拦截本机构建的程序，按 IT 的软件审批流程处理。
 
