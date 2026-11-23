@@ -4,7 +4,8 @@ param(
     [ValidateSet('GitHub', 'HuggingFace')]
     [string]$TargetSource = 'GitHub',
     [ValidateSet('GitHub', 'HuggingFace')]
-    [string]$ProjectorSource = 'GitHub'
+    [string]$ProjectorSource = 'GitHub',
+    [switch]$OpenCLFixOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -55,6 +56,25 @@ function Get-Asset($Name, $Expected, $Url = "$baseUrl/$Name") {
 
 $releaseAssets = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'veri1-release-sha256.json') | ConvertFrom-Json
 $manifestPath = Join-Path $destinationPath 'verify_manifest.json'
+if ($OpenCLFixOnly) {
+    if (!(Test-Path -LiteralPath $manifestPath -PathType Leaf)) { throw "Veri 1 is not installed at $destinationPath" }
+    $fix = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'veri1-opencl-fix.json') | ConvertFrom-Json
+    $server = Join-Path $destinationPath "bin/$($fix.server)"
+    if (!(Test-SHA256 $server $fix.server_sha256)) {
+        $archive = Get-Asset $fix.archive $fix.archive_sha256
+        $stage = Join-Path $downloads ('opencl-fix-' + [guid]::NewGuid())
+        try {
+            Expand-Archive -LiteralPath $archive -DestinationPath $stage
+            $candidate = Join-Path $stage $fix.server
+            if (!(Test-SHA256 $candidate $fix.server_sha256)) { throw 'OpenCL fix server SHA-256 mismatch.' }
+            Move-Item -LiteralPath $candidate -Destination $server -Force
+        } finally {
+            if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
+        }
+    }
+    Write-Output "OpenCL fix installed at: $server"
+    return
+}
 if (!(Test-Path -LiteralPath $manifestPath)) {
     $archive = Get-Asset 'veri1-runtime.zip' $releaseAssets.'veri1-runtime.zip'
     Expand-Archive -LiteralPath $archive -DestinationPath $destinationPath -Force

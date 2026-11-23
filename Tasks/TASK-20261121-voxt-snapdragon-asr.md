@@ -1,7 +1,7 @@
 # Voxt 骁龙 Windows ARM64 本地 ASR
 status: in-progress
 
-current_handoff: [HANDOFF-20261121-231833-voxt-snapdragon-asr.md](HANDOFF-20261121-231833-voxt-snapdragon-asr.md)
+current_handoff: [HANDOFF-20261122-182842-voxt-snapdragon-asr.md](HANDOFF-20261122-182842-voxt-snapdragon-asr.md)
 
 ## 目标与边界
 保留 Voxt 交互和协议，从干净上游构建 Qwen3-ASR 1.7B + DFlash。旧骁龙原型只提供性能现象参考。
@@ -20,6 +20,6 @@ current_handoff: [HANDOFF-20261121-231833-voxt-snapdragon-asr.md](HANDOFF-202611
 - [ ] 完成 Hexagon Target 验证前向的实机可行性与性能报告。
 - [ ] 验收 Windows 桌面听写与实时接口。
 ## Current State
-骁龙 CPU 两组单条快测通过，Adreno 两组在 Target 初始化时发生 0xC0000005，诊断分支已发布。
+OpenCL 初始化空指针已修复并交叉编译，6.2 MB ARM64 运行时补丁已上传，等待骁龙复验。
 ## 依赖与下一步
-骁龙结果依赖离线实机交接。下一步：在骁龙本运行 probe_opencl_startup.ps1 并回传一个文本报告，获取故障模块与偏移后定位并修复 OpenCL 启动
+骁龙结果依赖离线实机交接。下一步：按 Handoff.MD 获取 veri-1-opencl-fix 标签，在骁龙本使用原 Veri 1 模型完成四组 Quick 并回传报告

@@ -1,5 +1,20 @@
 # Veri 1 骁龙实机验收
 
+## OpenCL 启动修复复验
+
+在已安装 Veri 1 的骁龙本上，从源码仓库根目录运行：
+
+```powershell
+git fetch origin tag veri-1-opencl-fix
+git switch --detach veri-1-opencl-fix
+.\scripts\win-arm64\fetch_veri1.ps1 -OpenCLFixOnly
+.\scripts\win-arm64\run_verify.ps1 -OpenCLFix -Quick
+```
+
+只下载约 6 MB 的 ARM64 运行时更新，复用已安装的模型、依赖和评测集。脚本独立校验新 EXE 的 SHA-256，将它和 Veri 1 原版 EXE 并排放置。可通过 `-Destination` 和 `-InstallDirectory` 分别指定自定义的 Veri 1 安装目录。
+
+通过条件为四组快测都显示 PASS，两个 OpenCL 模式完成转录，OpenCL DFlash 有候选被接收且与 OpenCL Target-only 逐 token 一致。先回传 `Results:` 目录里的 `verify_report.md` 和 `verify_stats.json`。失败时一并回传该组 `.log`。
+
 ## 排查 OpenCL 启动崩溃
 
 如果 CPU 快测通过，但 OpenCL 在读取 `target.gguf` 后以 `0xC0000005` 退出，在源码仓库根目录运行：

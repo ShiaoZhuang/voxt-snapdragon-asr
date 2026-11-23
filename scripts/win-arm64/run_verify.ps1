@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param([switch]$Quick, [string]$OutputDirectory, [string]$InstallDirectory)
+param([switch]$Quick, [string]$OutputDirectory, [string]$InstallDirectory, [switch]$OpenCLFix)
 
 $ErrorActionPreference = 'Stop'
 $scriptRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '../..')).Path
@@ -17,6 +17,7 @@ if (Test-Path -LiteralPath $OutputDirectory) { throw "Output directory already e
 $output = (New-Item -ItemType Directory -Path $OutputDirectory).FullName
 $report = [System.Collections.Generic.List[string]]::new()
 $matrix = [ordered]@{}
+$runtimeUpdate = $null
 $passed = $true
 $previousBackend = $env:VOXT_ASR_BACKEND
 $previousTrace = $env:VOXT_ASR_TRACE
@@ -97,6 +98,15 @@ try {
     } catch { $report.Add("CIM inventory: $_") }
 
     $server = Join-Path $root 'bin/qwen3_asr_server.exe'
+    if ($OpenCLFix) {
+        $fix = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'veri1-opencl-fix.json') | ConvertFrom-Json
+        $server = Join-Path $root "bin/$($fix.server)"
+        if (!(Test-Path -LiteralPath $server -PathType Leaf)) { throw 'Run fetch_veri1.ps1 -OpenCLFixOnly first.' }
+        $serverHash = (Get-FileHash -LiteralPath $server -Algorithm SHA256).Hash
+        if ($serverHash -ne $fix.server_sha256) { throw "SHA-256 mismatch: $($fix.server)" }
+        $runtimeUpdate = [ordered]@{ source_commit=$fix.source_commit; server_sha256=$fix.server_sha256 }
+        $report.Add("OpenCL fix runtime: $($fix.source_commit) ($($fix.server_sha256))")
+    }
     $runner = Join-Path $root 'bin/final-benchmark.exe'
     $models = Join-Path $root 'models'
     $eval = Join-Path $root 'eval'
@@ -217,7 +227,9 @@ try {
     $report.Add('')
     $report.Add('Overall: ' + $(if ($passed) { 'PASS' } else { 'FAIL' }))
     $report | Set-Content -Encoding UTF8 -LiteralPath (Join-Path $output 'verify_report.md')
-    [ordered]@{ passed=$passed; quick=[bool]$Quick; runs=$matrix } | ConvertTo-Json -Depth 20 |
+    $stats = [ordered]@{ passed=$passed; quick=[bool]$Quick; runs=$matrix }
+    if ($runtimeUpdate) { $stats.runtime_update = $runtimeUpdate }
+    $stats | ConvertTo-Json -Depth 20 |
         Set-Content -Encoding UTF8 -LiteralPath (Join-Path $output 'verify_stats.json')
     Write-Output "Results: $output"
 }

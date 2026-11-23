@@ -1,0 +1,7 @@
+{
+  "source_commit": "41c20c64709f009c2f295c83afe2b58001c498a8",
+  "archive": "veri1-opencl-fix-arm64.zip",
+  "archive_sha256": "c252bc3635bc6645eb0c964c8d34d7c1293426ecf821ad40a96a834df286b385",
+  "server": "qwen3_asr_server-opencl-fix.exe",
+  "server_sha256": "5d1c2055e3f7569caade1e700032454ab64981d8ec88e2bc9f004cba18fc94b6"
+}
