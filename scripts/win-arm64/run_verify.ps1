@@ -60,6 +60,11 @@ function Get-RunTotals($Rows) {
         foreach ($event in $row.final_events) {
             $m = $event.generation_metadata
             if ($null -eq $m -or $null -eq $m.verify_round_count) { throw 'Voxt generation metadata is missing' }
+            if ($m.verify_round_count -gt 0 -and
+                ($null -eq $m.draft_ms -or $null -eq $m.target_ms -or $null -eq $m.draft_context_ms -or
+                 $m.draft_ms -lt 0 -or $m.target_ms -lt 0 -or $m.draft_context_ms -lt 0)) {
+                throw "Missing or invalid DFlash profiling for $($row.clip)."
+            }
             $total.rounds += $m.verify_round_count
             $total.accepted += $m.accepted_draft_token_count
             $total.proposed += $m.proposed_draft_token_count
@@ -152,6 +157,7 @@ try {
             $prefix = Join-Path $output $name
             $report.Add('')
             $report.Add("## $name")
+            Write-Host "Running $name..."
             $arguments = @('-binary', $server, '-target', $models, '-eval', $eval)
             if ($mode -eq 'draft-q4') { $arguments += @('-draft', $models, '-draft-bits', '4') }
             if ($Quick) { $arguments += @('-only', 'zh-plain-1') }
@@ -171,19 +177,24 @@ try {
                 $termCount = 0
                 foreach ($row in $biased) { $termCount += @($row.terms_found | Where-Object { $_ }).Count }
                 if (!$Quick) { $status = $status -and ($termCount -ge 7) }
+                $metrics = [ordered]@{ clips=$main.Count; error_rate=$errorRate; dictionary_hits=$termCount; sets=[ordered]@{} }
                 $report.Add(('Error rate: {0:P2} ({1}/{2}), dictionary hits: {3}' -f $errorRate, $total.edits, $total.units, $termCount))
                 if ($mode -eq 'draft-q4') {
                     $clean = Get-RunTotals @($main | Where-Object { $_.clip -in @('zh-plain-1','en-3','en-4') })
                     $average = if ($total.rounds) { $total.accepted / $total.rounds } else { 0 }
                     $rate = if ($total.proposed) { $total.accepted / $total.proposed } else { 0 }
                     $cleanAverage = if ($clean.rounds) { $clean.accepted / $clean.rounds } else { 0 }
+                    $metrics.avg_accept = $average
+                    $metrics.avg_step = 1 + $average
+                    $metrics.accept_rate = $rate
+                    $metrics.clean_avg_accept = $cleanAverage
                     $report.Add(('avg_accept {0:F2}, avg_step {1:F2}, accept_rate {2:P1}, clean avg_accept {3:F2}' -f $average, (1+$average), $rate, $cleanAverage))
                     $timed = $total.draft_ms + $total.target_ms + $total.context_ms
                     if ($timed -gt 0 -and $total.rounds -gt 0) {
                         foreach ($phase in @('draft_ms', 'target_ms', 'context_ms')) {
                             $report.Add(('  {0}: {1:P1}, {2:F2} ms/round' -f $phase, ($total[$phase] / $timed), ($total[$phase] / $total.rounds)))
                         }
-                    }
+                    } else { $status = $false; $report.Add('DFlash profiling is missing.') }
                     if ($Quick) { $status = $status -and ($total.accepted -gt 0) }
                     else { $status = $status -and ($average -ge 3.0) -and ($cleanAverage -ge 5.3) }
                     if ($matrix.Contains("$backend-target-only") -and $matrix["$backend-target-only"].rows) {
@@ -198,12 +209,14 @@ try {
                                 $tokenDiffs += $row.clip
                             }
                         }
+                        $metrics.greedy_token_mismatches = $tokenDiffs
                         $report.Add("Greedy token mismatches: $($tokenDiffs.Count) $($tokenDiffs -join ', ')")
                         $status = $status -and ($tokenDiffs.Count -eq 0)
                     } else { $status = $false }
                 }
                 foreach ($group in @($main | Group-Object set)) {
                     $groupTotal = Get-RunTotals $group.Group
+                    $metrics.sets[$group.Name] = $groupTotal.edits / $groupTotal.units
                     $report.Add(('{0}: {1:P2} ({2}/{3})' -f $group.Name, ($groupTotal.edits / $groupTotal.units), $groupTotal.edits, $groupTotal.units))
                 }
                 if ($mode -eq 'draft-q4') {
@@ -224,16 +237,19 @@ try {
                     $one = Get-RunTotals @($row)
                     $report.Add(('| {0} | {1}/{2} | {3}/{4} | {5} | {6:F0} |' -f $row.clip, $one.edits, $one.units, $one.accepted, $one.proposed, $one.rounds, $one.elapsed_ms))
                 }
-                $matrix[$name] = [ordered]@{passed=$status; aggregate=$total; rows=$rows }
+                $matrix[$name] = [ordered]@{passed=$status; metrics=$metrics; aggregate=$total; rows=$rows }
                 $passed = $passed -and $status
             } catch {
                 $passed = $false
                 $matrix[$name] = [ordered]@{passed=$false; error=$_.ToString()}
                 $report.Add("FAIL: $_")
                 if (Test-Path -LiteralPath "$prefix.log") {
+                    $tail = @(Get-Content -Encoding UTF8 -Tail 25 -LiteralPath "$prefix.log")
+                    $diagnosis = $tail | Where-Object { $_ -match 'failed|error|exit|warmup|stall|timeout' } | Select-Object -Last 1
+                    if ($diagnosis) { $matrix[$name].diagnostic = $diagnosis }
                     $report.Add('')
                     $report.Add('~~~text')
-                    $report.Add(((Get-Content -Encoding UTF8 -Tail 25 -LiteralPath "$prefix.log") -join "`n"))
+                    $report.Add(($tail -join "`n"))
                     $report.Add('~~~')
                 }
             }

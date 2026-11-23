@@ -8,89 +8,59 @@ param(
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 $summary = [System.Collections.Generic.List[string]]::new()
-$summary.Add('Test: OpenCL Target-only vs Q4 DFlash on zh-plain-1')
-
-function Invoke-HandoffClip([string]$Name, [switch]$Draft) {
-    $summary.Add("--- $Name ---")
-    $probe = Join-Path $LogDirectory "opencl-$Name.txt"
-    & (Join-Path $PSScriptRoot 'probe_opencl_startup.ps1') -NativeBuildDirectory $BuildDirectory `
-        -InstallDirectory $InstallDirectory -Transcribe -Draft:$Draft -ReportPath $probe | Out-Host
-    $lines = @(Get-Content -Encoding UTF8 -LiteralPath $probe)
-    $done = $null
-    foreach ($line in $lines) {
-        if ($line -match '^(Started PID:|No ready event|Exit code:|Startup probe error:|Transcription HTTP|Transcription probe:)') {
-            $summary.Add($line.Trim())
-        } elseif ($line -match 'offloaded [0-9]+/[0-9]+ layers to GPU') {
-            $summary.Add($Matches[0])
-        } elseif ($line -match '^data: \{') {
-            $eventData = $line.Substring(6) | ConvertFrom-Json
-            if ($eventData.type -eq 'transcript.text.done') { $done = $eventData }
-        }
-    }
-    if ($lines -notcontains 'Transcription probe: PASS' -or $lines -notcontains 'Exit code: 0 (0x00000000)') {
-        $processLine = $lines | Where-Object { $_ -match '^Started PID: ' } | Select-Object -First 1
-        if ($processLine -match '^Started PID: ([0-9]+)$') {
-            $processHex = '{0:x}' -f [int]$Matches[1]
-            $event = $lines | Select-String -Pattern "^\s*ProcessId\s*:\s*0x0*$processHex\s*$" -Context 0,4 | Select-Object -First 1
-            if ($event) { foreach ($line in $event.Context.PostContext) { $summary.Add($line.Trim()) } }
-        }
-        $diagnostics = @($lines | Where-Object { $_ -match 'GGML_ASSERT|CL_[A-Z_]+|failed to|\bERROR\b' } | Select-Object -Last 3)
-        foreach ($line in $diagnostics) { $summary.Add($line.Trim()) }
-        throw "OpenCL did not complete the transcription and clean shutdown. See opencl-$Name.txt."
-    }
-    if (!$done.generation_metadata.token_ids.Count) { throw "Missing token trace. See opencl-$Name.txt." }
-    $summary.Add("Generated tokens: $($done.generation_metadata.generated_token_count)")
-    return $done
-}
-
+$summary.Add('Test: Voxt 31 clips | Oryon CPU + Adreno OpenCL | Target-only + Q4 DFlash')
 $stage = 'local assets'
 try {
-    $manifest = Get-Content -Raw -LiteralPath (Join-Path $InstallDirectory 'verify_manifest.json') | ConvertFrom-Json
-    foreach ($relativePath in @('models/target.gguf', 'models/mmproj.gguf', 'models/draft-4.gguf', 'eval/zh-plain-1.wav')) {
-        $asset = Join-Path $InstallDirectory $relativePath
-        if (!(Test-Path -LiteralPath $asset -PathType Leaf)) { throw "Missing installed Veri 1 asset: $asset" }
-        if ((Get-FileHash -LiteralPath $asset -Algorithm SHA256).Hash -ne $manifest.files.$relativePath) {
-            throw "SHA-256 mismatch: $relativePath"
-        }
+    if (!(Test-Path -LiteralPath (Join-Path $InstallDirectory 'verify_manifest.json') -PathType Leaf)) {
+        throw "Missing installed Veri 1 manifest at $InstallDirectory"
     }
 
     $stage = 'native build'
-    & (Join-Path $PSScriptRoot 'build_native.ps1') -BackendOnly -BuildDirectory $BuildDirectory
-    $summary.Add('Native build: PASS')
+    & (Join-Path $PSScriptRoot 'build_native.ps1') -BuildDirectory $BuildDirectory
+    $summary.Add('Native backend and benchmark build: PASS')
 
-    $stage = 'OpenCL Target-only'
-    $target = Invoke-HandoffClip 'target-only'
-    if ($target.generation_metadata.verify_round_count -ne 0) { throw 'Target-only unexpectedly used speculative verification.' }
-
-    $stage = 'OpenCL Q4 DFlash'
-    $draft = Invoke-HandoffClip 'draft-q4' -Draft
-    $metadata = $draft.generation_metadata
-    $rounds = [int]$metadata.verify_round_count
-    $proposed = [int]$metadata.proposed_draft_token_count
-    $accepted = [int]$metadata.accepted_draft_token_count
-    if ($rounds -le 0 -or $accepted -le 0 -or $proposed -lt $accepted -or $proposed -gt 7 * $rounds) {
-        throw "Invalid DFlash counts: $accepted/$proposed accepted in $rounds rounds."
-    }
-    $average = $accepted / $rounds
-    $summary.Add(('DFlash: {0}/{1} accepted in {2} rounds | avg_accept {3:F2} | avg_step {4:F2} | accept_rate {5:P1}' -f
-        $accepted, $proposed, $rounds, $average, ($average + 1), ($accepted / $proposed)))
-    $times = [ordered]@{ Draft=$metadata.draft_ms; Target=$metadata.target_ms; Context=$metadata.draft_context_ms }
-    $total = 0.0
-    foreach ($phase in $times.Keys) {
-        if ($null -eq $times[$phase] -or $times[$phase] -lt 0) { throw "Missing or invalid timing for $phase." }
-        $total += $times[$phase]
-    }
-    if ($total -le 0) { throw 'DFlash profiling returned zero total time.' }
-    foreach ($phase in $times.Keys) {
-        $summary.Add(('{0}: {1:F2} ms/round ({2:P1})' -f $phase, ($times[$phase] / $rounds), ($times[$phase] / $total)))
+    $stage = 'Voxt benchmark'
+    $results = Join-Path $LogDirectory 'verification'
+    & (Join-Path $PSScriptRoot 'run_verify.ps1') -NativeBuildDirectory $BuildDirectory `
+        -InstallDirectory $InstallDirectory -OutputDirectory $results
+    $stats = Get-Content -Raw -LiteralPath (Join-Path $results 'verify_stats.json') | ConvertFrom-Json
+    $report = Join-Path $results 'verify_report.md'
+    foreach ($line in @(Get-Content -Encoding UTF8 -LiteralPath $report | Where-Object { $_ -match '^(Preflight failed:|Device query failed:|  GPUOpenCL:)' })) {
+        $summary.Add($line.Trim())
     }
 
-    $stage = 'greedy token comparison'
-    if (($target.generation_metadata.token_ids -join ',') -ne ($metadata.token_ids -join ',') -or $target.text -cne $draft.text) {
-        throw 'Target-only and Q4 DFlash outputs differ. Token IDs and verify rounds are in the two OpenCL logs.'
+    foreach ($name in @('cpu-target-only', 'cpu-draft-q4', 'opencl-target-only', 'opencl-draft-q4')) {
+        $run = $stats.runs.$name
+        if (!$run) { continue }
+        if ($run.error) {
+            $summary.Add("${name}: FAIL | $($run.error)")
+            if ($run.diagnostic) { $summary.Add("  $($run.diagnostic)") }
+            continue
+        }
+        $m = $run.metrics
+        $total = $run.aggregate
+        $label = if ($run.passed) { 'PASS' } else { 'FAIL' }
+        $summary.Add(('{0}: {1} | {2} clips | error {3:P2} | dict {4}/10 | wall sum {5:F1} s' -f
+            $name, $label, $m.clips, $m.error_rate, $m.dictionary_hits, ($total.elapsed_ms / 1000)))
+        if ($name -like '*draft*') {
+            $summary.Add(('  avg_accept {0:F2} | avg_step {1:F2} | rate {2:P1} | clean {3:F2}' -f
+                $m.avg_accept, $m.avg_step, $m.accept_rate, $m.clean_avg_accept))
+            if ($null -ne $m.greedy_token_mismatches) {
+                $summary.Add("  Token mismatches: $($m.greedy_token_mismatches.Count) $($m.greedy_token_mismatches -join ', ')".TrimEnd())
+            }
+            $summary.Add(('  zh-plain {0:P2} | en {1:P2} | long {2:P2}' -f
+                $m.sets.'zh-plain', $m.sets.en, $m.sets.long))
+            $timed = $total.draft_ms + $total.target_ms + $total.context_ms
+            if ($timed -gt 0 -and $total.rounds -gt 0) {
+                $summary.Add(('  ms/round: Draft {0:F2} ({1:P1}) | Target {2:F2} ({3:P1}) | Context {4:F2} ({5:P1})' -f
+                    ($total.draft_ms / $total.rounds), ($total.draft_ms / $timed),
+                    ($total.target_ms / $total.rounds), ($total.target_ms / $timed),
+                    ($total.context_ms / $total.rounds), ($total.context_ms / $timed)))
+            } else { $summary.Add('  DFlash profiling unavailable.') }
+        }
     }
-    $summary.Add('Greedy token comparison: PASS (identical token IDs and transcript)')
-    $summary.Add("Transcript: $($draft.text)")
+    $summary.Add("Full report: $report")
+    if (!$stats.passed) { throw 'One or more Voxt benchmark gates failed.' }
 } catch {
     $summary.Add("Failed step: $stage")
     $summary.Add("Error: $($_.Exception.Message)")

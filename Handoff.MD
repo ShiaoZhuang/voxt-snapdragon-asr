@@ -15,7 +15,7 @@ git switch --detach veri-1-auto-handoff
 .\scripts\win-arm64\update_and_verify.ps1
 ```
 
-启动脚本从本仓库的 `veri/native-win-arm64` 分支同步最新提交到专用工作目录，然后运行该提交指定的验证任务。当前任务用 OpenCL 的纯 Target 和 Q4 DFlash 分别转录 `zh-plain-1.wav`，检查输出逐 token 一致，并记录候选接收数和三段耗时。此轮复用已有模型和评测音频，可在只安装 C++ 工具链的环境运行。如果模型在自定义目录，运行时加 `-InstallDirectory`。
+启动脚本从本仓库的 `veri/native-win-arm64` 分支同步最新提交到专用工作目录，再运行该提交指定的验证任务。当前任务是 Voxt 31 条全量评测，分别执行 Oryon CPU 和 Adreno OpenCL 的 Target-only 与 Q4 DFlash。脚本使用本机已安装的 Go 1.27.1+ 编译 Voxt 评测器，复用已有模型和评测音频。如果模型在自定义目录，运行时加 `-InstallDirectory`。[Go 官方下载](https://go.dev/dl/)
 
 结束后拍屏幕上的 **VOXT SNAPDRAGON REPORT** 整段，包含提交、通过状态、关键错误和日志位置。完整输出、探针报告和文本摘要保存在 `Logs:` 指向的目录。
 
