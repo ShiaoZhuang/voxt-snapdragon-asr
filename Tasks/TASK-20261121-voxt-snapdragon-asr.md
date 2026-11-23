@@ -1,7 +1,7 @@
 # Voxt 骁龙 Windows ARM64 本地 ASR
 status: in-progress
 
-current_handoff: [HANDOFF-20261123-063404-voxt-snapdragon-asr.md](HANDOFF-20261123-063404-voxt-snapdragon-asr.md)
+current_handoff: [HANDOFF-20261123-064020-voxt-snapdragon-asr.md](HANDOFF-20261123-064020-voxt-snapdragon-asr.md)
 
 ## 目标与边界
 保留 Voxt 交互和协议，从干净上游构建 Qwen3-ASR 1.7B + DFlash。旧骁龙原型只提供性能现象参考。
@@ -22,10 +22,11 @@ current_handoff: [HANDOFF-20261123-063404-voxt-snapdragon-asr.md](HANDOFF-202611
 - [x] 完成固定八位置 QNN 投影探针的 CPU 数值对照。
 - [x] 骁龙实机安装并选用 ARM64 Python，完成 QNN 依赖预检。
 - [x] 骁龙实机确认合成 QNN 投影在 HTP 执行、数值达标并记录 profiling。
-- [ ] 捕获并回放真实 DFlash 八位置验证的第一层 FFN 投影。
+- [x] 捕获真实 DFlash 八位置验证的第一层 FFN 投影并建立 Q8_0 数值参考。
+- [ ] 在骁龙 HTP 回放真实激活和真实权重重编码的第一层 FFN 投影。
 - [ ] 完成 Hexagon Target 验证前向的实机可行性与性能报告。
 - [ ] 验收 Windows 桌面听写与实时接口。
 ## Current State
-骁龙 Hexagon HTP 合成投影通过，扩大 A16 编码范围后最大误差 1 步。
+骁龙合成 HTP 已通过，Mac 已捕获真实 DFlash 八位置并验证 Q8_0 投影参考。
 ## 依赖与下一步
-骁龙结果依赖离线实机交接。下一步：在 Mac 上捕获真实 Voxt DFlash 八位置验证的第一层 FFN 输入与投影输出，准备实机回放。
+骁龙结果依赖离线实机交接。下一步：把逐输出通道 A16/U8 真实权重投影接入 QNN 回放，对相同输入核对 CPU 参考、HTP 事件和误差，再更新固定骁龙入口。

@@ -179,16 +179,33 @@
      // note: must be signed - they are subtracted before the later ones are set
 --- a/tools/server/server-context.cpp
 +++ b/tools/server/server-context.cpp
-@@ -1,4 +1,8 @@
+@@ -1,4 +1,9 @@
  #include "server-context.h"
 +#include "generation.h"
++#include "verify_capture.h"
 +#include <charconv>
 +#include <cmath>
 +#include <cstring>
  #include <atomic>
  #include <thread>
  #include "base64.hpp"
-@@ -2207,7 +2211,17 @@
+@@ -1093,6 +1098,7 @@
+     // use server_context methods instead
+
+     common_params params_base;
++    voxt_verify_capture voxt_capture;
+
+     // note: keep these alive - they determine the lifetime of the model, context, etc.
+     common_init_result_ptr llama_init;
+@@ -1323,6 +1329,7 @@
+             params_base.load_progress_callback_user_data = &load_progress_text;
+         }
+
++        voxt_capture.configure(params_base);
+         llama_init = common_init_from_params(params_base);
+
+         model_tgt = llama_init->model();
+@@ -2207,7 +2214,17 @@
              }
          }
  
@@ -207,7 +224,7 @@
              slot.stop           = STOP_TYPE_EOS;
              slot.has_next_token = false;
  
-@@ -3879,9 +3893,20 @@
+@@ -3879,9 +3896,20 @@
  
          // generate the actual drafts (if any)
          if (!drafting.empty()) {
@@ -228,43 +245,59 @@
          }
  
          // make checkpoints if needed
-@@ -4644,11 +4669,22 @@
+@@ -4644,11 +4672,38 @@
  
          // yield to the queue, so we can still handle metrics tasks while decoding
          // note: the sync is done here too, so that the wait is also covered by the yield
++        const bool voxt_profile = voxt_profile_enabled();
 +        server_slot * voxt_verify_slot = nullptr;
-+        if (voxt_profile_enabled() && slots.size() == 1) {
++        if ((voxt_profile || voxt_capture.enabled()) && slots.size() == 1) {
 +            auto & slot = slots.front();
 +            if (slot.task && slot.task->params.voxt_final && !slot.spec_i_batch.empty()) {
 +                voxt_verify_slot = &slot;
 +            }
 +        }
++        const bool capture = voxt_capture.enabled() && voxt_verify_slot &&
++            batch.view.size() == voxt_verify_capture::positions &&
++            voxt_verify_slot->spec_i_batch.size() == voxt_verify_capture::positions &&
++            voxt_verify_slot->spec_i_batch.front() == off;
          int ret = 0;
          queue_tasks.yield_to_queue([&]() {
-+            const int64_t start = voxt_verify_slot ? ggml_time_us() : 0;
++            const int64_t start = voxt_profile && voxt_verify_slot ? ggml_time_us() : 0;
++            if (capture) {
++                voxt_capture.begin();
++            }
              ret = llama_process(ctx_tgt, LLAMA_PROCESS_TYPE_DECODE, batch.view.get());
              if (ret == 0 && has_output) {
                  llama_synchronize(ctx_tgt);
-+                if (voxt_verify_slot) {
++                if (voxt_profile && voxt_verify_slot) {
 +                    voxt_verify_slot->stats.voxt_verify_microseconds += ggml_time_us() - start;
 +                }
++            }
++            if (capture) {
++                std::array<int, voxt_verify_capture::positions> tokens, positions;
++                for (int i = 0; i < voxt_verify_capture::positions; ++i) {
++                    tokens[i] = batch.tokens[off + i].token;
++                    positions[i] = batch.tokens[off + i].pos[0];
++                }
++                voxt_capture.finish(ret == 0, tokens, positions);
              }
          });
  
-@@ -4711,7 +4747,12 @@
+@@ -4711,7 +4766,12 @@
          if (spec) {
              bool ok = true;
              queue_tasks.yield_to_queue([&]() {
-+                const int64_t start = voxt_verify_slot ? ggml_time_us() : 0;
++                const int64_t start = voxt_profile && voxt_verify_slot ? ggml_time_us() : 0;
                  ok = common_speculative_process(spec.get(), batch.view);
-+                if (voxt_verify_slot && ctx_dft) {
++                if (voxt_profile && voxt_verify_slot && ctx_dft) {
 +                    llama_synchronize(ctx_dft);
 +                    voxt_verify_slot->stats.voxt_context_microseconds += ggml_time_us() - start;
 +                }
              });
  
              if (!ok) {
-@@ -4953,6 +4994,14 @@
+@@ -4953,6 +5013,14 @@
                      SLT_INF(slot, "accepted %2zu/%2zu draft tokens\n", accepted.size() - 1, n_draft);
                  }
  
@@ -279,7 +312,7 @@
                  common_speculative_accept(spec.get(), slot.id, accepted.size() - 1);
  
                  slot.spec_draft = std::move(accepted);
-@@ -5156,9 +5205,9 @@
+@@ -5156,9 +5224,9 @@
      return impl->load_model(params);
  }
  
@@ -291,7 +324,7 @@
  }
  
  void server_context::terminate() {
-@@ -5271,6 +5320,8 @@
+@@ -5271,6 +5339,8 @@
  //
  // server_routes
  //
@@ -300,7 +333,6 @@
  
  std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
              const server_http_req & req,
-diff --git a/ggml/src/ggml-opencl/ggml-opencl.cpp b/ggml/src/ggml-opencl/ggml-opencl.cpp
 --- a/ggml/src/ggml-opencl/ggml-opencl.cpp
 +++ b/ggml/src/ggml-opencl/ggml-opencl.cpp
 @@ -481,6 +481,8 @@
