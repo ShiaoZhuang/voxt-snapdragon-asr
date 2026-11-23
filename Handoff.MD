@@ -15,11 +15,14 @@ git switch --detach veri-1-auto-handoff
 .\scripts\win-arm64\update_and_verify.ps1
 ```
 
-本轮验证 **第 0 层从 post-RoPE 开始的八位置整图**。脚本同步 `veri/native-win-arm64`，复用现有模型和公开 `zh-plain-1.wav`，在 Adreno 采集首个完整验证批次并核对新 K/V 与物理缓存位置。整图在固定容量内追加候选 K/V，执行 attention、输出投影、残差、FFN RMSNorm、完整 SwiGLU FFN 与最后的残差相加。整图失败时自动回跑已验收的 FFN 与 attention 子图以定位。HTP 禁用 CPU fallback。
+脚本同步 `veri/native-win-arm64`，在骁龙本编译一次，复用现有模型和公开 `zh-plain-1.wav`，采集一次 Adreno 八位置验证批次。同一次运行会验证两张图：
 
-结束后拍回整段 **VOXT SNAPDRAGON REPORT**。整图需要 CPU 对独立参考的相对 L2 ≤0.25%，HTP 对通过的 CPU 与独立参考均 ≤0.5%，最大误差分别 ≤参考峰值的 1% 和 2%。报告同时给出混合精度重编码造成的误差、HTP 执行事件和主机往返耗时。单次回放使用已捕获的 K/V 和 post-RoPE 张量，跨轮提交与回滚进入后续验证。
+- `full-decoder` 从隐藏状态开始，执行 RMSNorm、Q/K/V 投影、Q/K 归一化、应用由采集位置计算的 M-RoPE 旋转、KV 追加、attention、输出投影、残差和 SwiGLU FFN。
+- `decoder-layer` 从采集的 post-RoPE Q/K/V 开始，提供上一轮已过实机的对照。若这项失败，同一次运行继续收集 FFN 与 attention 子图诊断。
 
-CPU 首先回放原图，失败时仅将 attention 内部切换为 FP32 复核。两条 CPU 路径都失败时，HTP 仍与独立参考比较并保存执行证据，总体报告保留 CPU 对照未通过的状态。完整文件在 `Logs` 指向的目录内。
+两张图都复用各自的推理会话验证 KV 可见性。脚本扰动被屏蔽的历史列，以及模拟接受 0、1、3 个候选时被拒绝的后缀，检查保留位置的输出。该测试覆盖静态掩码和前缀隔离。原生 KV 跨轮提交与回滚仍待验收。
+
+结束后拍回整段 **VOXT SNAPDRAGON REPORT**。整图需要 CPU 对独立参考的相对 L2 ≤0.25%，HTP 对通过的 CPU 与独立参考均 ≤0.5%，最大误差分别 ≤参考峰值的 1% 和 2%。仅运行小图 CPU 数值对照，attention 内部使用 FP32。HTP 禁用 CPU fallback。CPU 对照失败时仍尝试 HTP 并保存能取得的执行证据。报告同时给出 QAIRT 执行事件和 30 次热态往返耗时。完整文件在 `Logs` 指向的目录内。
 
 ## Hexagon HTP 依赖
 

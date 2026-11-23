@@ -118,6 +118,37 @@ def compare_attention_output(actual, expected, *, backend):
     }
 
 
+def check_cache_visibility(session, run_options, inputs, baseline):
+    """Stress the real causal mask with intentionally changed, out-of-scope data."""
+    results = {}
+    padding = np.isneginf(inputs["attn_mask"][0, 0, :, :inputs["past_key"].shape[2]]).all(axis=0)
+    if np.any(padding):
+        variant = dict(inputs)
+        for name, value in (("past_key", 0.75), ("past_value", -1.5)):
+            variant[name] = inputs[name].copy()
+            variant[name][:, :, padding] = value
+        actual, = session.run(None, variant, run_options)
+        results["masked-history"] = bool(np.array_equal(actual, baseline))
+    else:
+        results["masked-history"] = None
+
+    for accepted in (0, 1, 3):
+        prefix = 1 + accepted  # The anchor is retained even when every proposal is rejected.
+        variant = dict(inputs)
+        if "V" in inputs:
+            variant["V"] = inputs["V"].copy()
+            variant["V"][:, :, prefix:] *= -1
+        else:
+            variant["residual"] = inputs["residual"].copy()
+            variant["residual"][prefix:] *= -1
+        actual, = session.run(None, variant, run_options)
+        results[f"accept-{accepted}"] = (
+            np.array_equal(actual[:prefix], baseline[:prefix]) and
+            not np.array_equal(actual[prefix:], baseline[prefix:])
+        )
+    return results
+
+
 def benchmark(args):
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
@@ -138,7 +169,7 @@ def benchmark(args):
         inputs = {"x_u16": feed}
     full_ffn = kind == "full-ffn"
     attention = kind == "attention"
-    layer = kind == "decoder-layer"
+    layer = kind in {"decoder-layer", "full-decoder"}
     relative_limits = None
     if attention or layer:
         relative_limits = ATTENTION_MAX_RELATIVE_L2[args.backend], ATTENTION_MAX_ERROR_OF_PEAK[args.backend]
@@ -195,6 +226,9 @@ def benchmark(args):
             cpu_output = np.load(args.cpu_output, allow_pickle=False)
             cpu_comparison = compare_run(actual, cpu_output)
             comparison["accuracy_passed"] &= cpu_comparison["accuracy_passed"]
+        visibility = check_cache_visibility(session, run_options, inputs, actual) if layer else None
+        if visibility is not None:
+            comparison["accuracy_passed"] &= all(passed for passed in visibility.values() if passed is not None)
         elapsed_ms = []
         if comparison["accuracy_passed"]:
             for _ in range(args.warmup):
@@ -227,6 +261,7 @@ def benchmark(args):
             "providers": session.get_providers(),
             "activation_code_multiplier": None if args.replay else multiplier,
             "cpu_comparison": cpu_comparison,
+            "kv_visibility": visibility,
             "independent_accuracy_passed": independent_accuracy_passed,
             "max_allowed_error_quantization_steps": None if relative_limits else MAX_ERROR_STEPS,
             "max_allowed_relative_l2": relative_limits[0] if relative_limits else None,

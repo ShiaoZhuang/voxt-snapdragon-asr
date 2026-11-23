@@ -23,7 +23,8 @@ public:
         return (node->op == GGML_OP_FLASH_ATTN_EXT && query && query->ne[0] == 128 &&
                 query->ne[1] == 8 && query->ne[2] == 16 && query->ne[3] == 1) ||
                std::strcmp(name, "kq-0") == 0 || std::strcmp(name, "kq_soft_max-0") == 0 ||
-               std::strcmp(name, "kqv-0") == 0 || std::strcmp(name, "Kcur-0") == 0 ||
+               std::strcmp(name, "kqv-0") == 0 || std::strcmp(name, "Qcur-0") == 0 ||
+               std::strcmp(name, "Kcur-0") == 0 ||
                std::strcmp(name, "Vcur-0") == 0;
     }
 
@@ -47,6 +48,16 @@ public:
         } else if (std::strcmp(name, "kqv-0") == 0) {
             v.read(node->src[0]);
             output.read(node);
+        } else if (std::strcmp(name, "Qcur-0") == 0 && node->op == GGML_OP_ROPE && node->src[2] == nullptr) {
+            rope_positions.read(node->src[1]);
+            // Parameter layout at the pinned ggml revision. Capture effective runtime settings.
+            std::array<float, 4> scaling{};
+            std::memcpy(scaling.data(), node->op_params + 5, sizeof(scaling));
+            const std::vector<int32_t> sections(node->op_params + 11, node->op_params + 15);
+            rope = common_json{{"dims", node->op_params[1]}, {"mode", node->op_params[2]},
+                               {"base", scaling[0]}, {"freq_scale", scaling[1]},
+                               {"ext_factor", scaling[2]}, {"attn_factor", scaling[3]},
+                               {"sections", sections}, {"offset", node->op_params[15]}};
         } else if (std::strcmp(name, "Kcur-0") == 0) {
             current_k.read(node);
         } else if (std::strcmp(name, "Vcur-0") == 0) {
@@ -59,9 +70,12 @@ public:
             return;
         }
         common_json manifest = {{"flash", flash}, {"scale", scale}};
-        for (const auto & item : std::array<std::pair<const char *, const tensor *>, 8>{{
+        if (!rope_positions.bytes.empty()) {
+            manifest["rope"] = rope;
+        }
+        for (const auto & item : std::array<std::pair<const char *, const tensor *>, 9>{{
                  {"q", &q}, {"k", &k}, {"v", &v}, {"mask", &mask}, {"attention_output", &output}, {"kv_rows", &rows},
-                 {"current_k", &current_k}, {"current_v", &current_v},
+                 {"current_k", &current_k}, {"current_v", &current_v}, {"rope_positions", &rope_positions},
              }}) {
             if (!item.second->bytes.empty()) {
                 manifest[item.first] = item.second->save(directory, item.first);
@@ -121,7 +135,8 @@ private:
         }
     };
 
-    tensor q, k, v, mask, output, rows, current_k, current_v;
+    tensor q, k, v, mask, output, rows, current_k, current_v, rope_positions;
+    common_json rope;
     float scale = 0;
     bool flash = false;
 };

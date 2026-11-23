@@ -8,7 +8,7 @@ param(
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 $summary = [System.Collections.Generic.List[string]]::new()
-$summary.Add('Test: layer-0 integrated post-RoPE replay | KV append, attention, residual and FFN | eight positions')
+$summary.Add('Test: layer-0 full and post-RoPE HTP replay | eight positions | KV visibility')
 $source = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '../..')).Path
 
 function Invoke-QnnStep([string]$Exe, [string[]]$Arguments, [string]$Name, [int]$TimeoutSeconds, [switch]$Probe) {
@@ -175,12 +175,16 @@ sys.exit(0 if platform == 'win-arm64' and sys.implementation.name == 'cpython' a
     $toolsDir = Join-Path $source 'tools/qnn-probe'
     $target = Join-Path $InstallDirectory 'models/target.gguf'
     $failures = @()
+    $postRopePassed = $false
     foreach ($case in @(
+        @{Name = 'full-decoder'; Prepare = 'prepare_decoder_layer.py'; More = @('--target', $target, '--full'); Output = 'actual_u16.npy'}
         @{Name = 'decoder-layer'; Prepare = 'prepare_decoder_layer.py'; More = @('--target', $target); Output = 'actual_u16.npy'}
         @{Name = 'full-ffn'; Prepare = 'prepare_ffn.py'; More = @('--target', $target); Output = 'actual_u16.npy'}
         @{Name = 'attention'; Prepare = 'prepare_attention.py'; More = @(); Output = 'actual_f16.npy'}
     )) {
         $name = $case.Name
+        $layer = $name -in @('full-decoder', 'decoder-layer')
+        if (!$layer -and $postRopePassed) { break }
         $fixture = Join-Path $LogDirectory "$name-fixture"
         $cpuOutput = Join-Path $LogDirectory "$name-cpu"
         $htpOutput = Join-Path $LogDirectory "$name-htp"
@@ -189,10 +193,15 @@ sys.exit(0 if platform == 'win-arm64' and sys.implementation.name == 'cpython' a
             Invoke-QnnStep $python (@('-X', 'utf8', (Join-Path $toolsDir $case.Prepare),
                 '--capture', $capture, '--output', $fixture) + $case.More) "$name-prepare" 180
             $prep = Get-Content -Raw -LiteralPath (Join-Path $fixture 'preparation.json') | ConvertFrom-Json
-            if ($name -eq 'decoder-layer') {
+            if ($layer) {
                 $summary.Add("KV append: $($prep.history_tokens) history + $($prep.staged_tokens) staged | static columns: $($prep.cache_columns)")
-                $summary.Add(('Mixed precision vs dense Q8_0 | L2: {0:P4}' -f $prep.mixed_precision_vs_dense.relative_l2_error))
-                $summary.Add(('Mixed precision vs captured Adreno layer | L2: {0:P4}' -f $prep.mixed_precision_vs_native_capture.relative_l2_error))
+                if ($name -eq 'full-decoder') {
+                    $qkv = $prep.dense_qkv_vs_native
+                    $summary.Add(('Q/K/V vs Adreno capture L2: {0:P3} / {1:P3} / {2:P3}' -f
+                        $qkv.Q.relative_l2_error, $qkv.K.relative_l2_error, $qkv.V.relative_l2_error))
+                }
+                $summary.Add(('Mixed precision L2 | vs dense Q8_0 {0:P3} | vs Adreno layer {1:P3}' -f
+                    $prep.mixed_precision_vs_dense.relative_l2_error, $prep.mixed_precision_vs_native_capture.relative_l2_error))
             } elseif ($name -eq 'attention') {
                 $summary.Add("KV columns: $($prep.cache_columns) | visible per query: $($prep.visible_keys_per_query -join ',')")
                 $summary.Add(('FP16 vs native Adreno attention | relative L2: {0:P4}' -f $prep.fp16_vs_native_capture.relative_l2_error))
@@ -201,8 +210,8 @@ sys.exit(0 if platform == 'win-arm64' and sys.implementation.name == 'cpython' a
             }
 
             $arguments = @('-X', 'utf8', (Join-Path $toolsDir 'projection.py'), '--replay', $fixture)
-            $cpuPassed = Invoke-ReplayCpu $python $arguments "$name-cpu" $cpuOutput
-            if (!$cpuPassed -and $name -ne 'full-ffn') {
+            $cpuPassed = Invoke-ReplayCpu $python $arguments "$name-cpu" $cpuOutput -Fp32:$layer
+            if (!$cpuPassed -and $name -eq 'attention') {
                 $cpuOutput = Join-Path $LogDirectory "$name-cpu-fp32"
                 $cpuPassed = Invoke-ReplayCpu $python $arguments "$name-cpu-fp32" $cpuOutput -Fp32
             }
@@ -228,6 +237,13 @@ sys.exit(0 if platform == 'win-arm64' and sys.implementation.name == 'cpython' a
                 $summary.Add(('HTP vs CPU | L2 {0:P4} | max / reference peak {1:P4}' -f
                     $htp.cpu_comparison.relative_l2_error, $htp.cpu_comparison.max_error_fraction_of_reference_peak))
             }
+            if ($layer -and $htp.kv_visibility) {
+                $visibility = foreach ($check in $htp.kv_visibility.PSObject.Properties) {
+                    $result = if ($null -eq $check.Value) { 'SKIP' } elseif ($check.Value) { 'PASS' } else { 'FAIL' }
+                    "$($check.Name)=$result"
+                }
+                $summary.Add("KV visibility: $($visibility -join ' | ')")
+            }
             if ($name -eq 'full-ffn') {
                 $summary.Add(('HTP vs CPU: max/P95 {0}/{1:F1} steps | >2 steps {2}/{3}' -f
                     $htp.cpu_comparison.max_error_quantization_steps, $htp.cpu_comparison.p95_error_quantization_steps,
@@ -245,7 +261,7 @@ sys.exit(0 if platform == 'win-arm64' and sys.implementation.name == 'cpython' a
             if (!$cpuPassed) { throw 'HTP diagnostic passed against the independent reference. A valid CPU pairing is still required.' }
             if (!$htp.cpu_comparison.accuracy_passed) { throw 'HTP comparison to the validated CPU reference failed.' }
             $summary.Add("${name}: PASS")
-            if ($name -eq 'decoder-layer') { break }
+            if ($name -eq 'decoder-layer') { $postRopePassed = $true }
         } catch {
             $failures += $name
             $summary.Add("${name}: FAIL | $($_.Exception.Message)")
