@@ -61,18 +61,33 @@ def attention_reference(q, k, v, mask, scale):
     return probability @ v
 
 
+def write_attention_graph(path, feeds, shape, scale, *, fp32_compute=False):
+    inputs = [helper.make_tensor_value_info(name, TensorProto.FLOAT16, value.shape) for name, value in feeds.items()]
+    result = helper.make_tensor_value_info("Y", TensorProto.FLOAT16, shape)
+    attention_inputs = list(feeds)
+    nodes = []
+    if fp32_compute:
+        attention_inputs = [f"{name}_f32" for name in feeds]
+        nodes.extend(helper.make_node("Cast", [name], [converted], to=TensorProto.FLOAT)
+                     for name, converted in zip(feeds, attention_inputs))
+    attention_output = "Y_f32" if fp32_compute else "Y"
+    nodes.append(helper.make_node("Attention", attention_inputs, [attention_output], name="Layer0GQA", scale=scale))
+    if fp32_compute:
+        nodes.append(helper.make_node("Cast", [attention_output], ["Y"], to=TensorProto.FLOAT16))
+    graph = helper.make_graph(nodes, "verify_layer0_attention", inputs, [result])
+    save_onnx_graph(graph, path, opset=23)
+
+
 def prepare(capture, output):
     q, k, v, mask, native, scale, counts = load_attention(capture)
     native_reference = compare(attention_reference(q, k, v, mask, scale), native)
     feeds = {name: np.ascontiguousarray(value, dtype=np.float16)
              for name, value in zip(("Q", "K", "V", "attn_mask"), (q, k, v, mask))}
     expected = attention_reference(*feeds.values(), scale).astype(np.float16)
-    inputs = [helper.make_tensor_value_info(name, TensorProto.FLOAT16, value.shape) for name, value in feeds.items()]
-    result = helper.make_tensor_value_info("Y", TensorProto.FLOAT16, expected.shape)
-    graph = helper.make_graph([helper.make_node("Attention", list(feeds), ["Y"], name="Layer0GQA", scale=scale)],
-                              "verify_layer0_attention", inputs, [result])
     output.mkdir(parents=True, exist_ok=False)
-    save_onnx_graph(graph, output / "verify_projection.onnx", opset=23)
+    write_attention_graph(output / "verify_projection.onnx", feeds, expected.shape, scale)
+    # Identical FP16 tensors at the boundary, with portable FP32 CPU arithmetic inside.
+    write_attention_graph(output / "attention_cpu_fp32.onnx", feeds, expected.shape, scale, fp32_compute=True)
     np.savez(output / "input_and_reference.npz", **feeds, expected=expected, replay_kind="attention")
 
     report = {

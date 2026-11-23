@@ -81,6 +81,27 @@ function Get-InstalledPython {
     }
 }
 
+function Invoke-ReplayCpu([string]$Python, [string[]]$Arguments, [string]$Name, [string]$Directory, [switch]$Fp32) {
+    $label = if ($Fp32) { 'CPU (FP32 arithmetic)' } else { 'CPU' }
+    $argsForCpu = $Arguments + @('--backend', 'cpu', '--output', $Directory, '--warmup', '0', '--runs', '1')
+    if ($Fp32) { $argsForCpu += '--attention-cpu-fp32' }
+    $step = Invoke-QnnStep $Python $argsForCpu $Name 180 -Probe
+    $report = Join-Path $Directory 'projection_probe.json'
+    if (!(Test-Path -LiteralPath $report -PathType Leaf)) {
+        $summary.Add("$label vs independent reference: NO RESULT ($($step.Status)). See $Name.stderr.log.")
+        foreach ($line in ($step.Errors -split '\r?\n' | Where-Object { $_.Trim() } | Select-Object -Last 2)) {
+            $summary.Add($line.Trim())
+        }
+        return $false
+    }
+    $result = Get-Content -Raw -LiteralPath $report | ConvertFrom-Json
+    $passed = $step.Passed -and $result.accuracy_passed
+    $verdict = if ($passed) { 'PASS' } else { 'FAIL' }
+    $summary.Add(('{0} vs independent reference: {1} | L2 {2:P4} | max / reference peak {3:P4} | {4}' -f
+        $label, $verdict, $result.relative_l2_error, $result.max_error_fraction_of_reference_peak, $step.Status))
+    return $passed
+}
+
 $stage = 'Python runtime'
 try {
     # The fixed launcher starts this workflow from the user's checkout.
@@ -175,12 +196,19 @@ sys.exit(0 if platform == 'win-arm64' and sys.implementation.name == 'cpython' a
             }
 
             $arguments = @('-X', 'utf8', (Join-Path $toolsDir 'projection.py'), '--replay', $fixture)
-            Invoke-QnnStep $python ($arguments + @('--backend', 'cpu', '--output', $cpuOutput,
-                '--warmup', '0', '--runs', '1')) "$name-cpu" 180
-            $cpu = Get-Content -Raw -LiteralPath (Join-Path $cpuOutput 'projection_probe.json') | ConvertFrom-Json
-            $summary.Add(('CPU vs independent reference | relative L2: {0:P4}' -f $cpu.relative_l2_error))
-            $step = Invoke-QnnStep $python ($arguments + @('--backend', 'htp', '--output', $htpOutput,
-                '--cpu-output', (Join-Path $cpuOutput $case.Output))) "$name-htp" 180 -Probe
+            $cpuPassed = Invoke-ReplayCpu $python $arguments "$name-cpu" $cpuOutput
+            if (!$cpuPassed -and $name -eq 'attention') {
+                $cpuOutput = Join-Path $LogDirectory 'attention-cpu-fp32'
+                $cpuPassed = Invoke-ReplayCpu $python $arguments 'attention-cpu-fp32' $cpuOutput -Fp32
+            }
+            if (!$cpuPassed -and $name -ne 'attention') { throw 'CPU reference failed.' }
+            $htpArguments = $arguments + @('--backend', 'htp', '--output', $htpOutput)
+            if ($cpuPassed) {
+                $htpArguments += @('--cpu-output', (Join-Path $cpuOutput $case.Output))
+            } else {
+                $summary.Add('HTP diagnostic: using the independent reference while CPU comparison is unavailable.')
+            }
+            $step = Invoke-QnnStep $python $htpArguments "$name-htp" 180 -Probe
             $htpReport = Join-Path $htpOutput 'projection_probe.json'
             if (!(Test-Path -LiteralPath $htpReport -PathType Leaf)) {
                 foreach ($line in ($step.Errors -split '\r?\n' | Where-Object { $_.Trim() } | Select-Object -Last 2)) {
@@ -189,9 +217,12 @@ sys.exit(0 if platform == 'win-arm64' and sys.implementation.name == 'cpython' a
                 throw "No HTP result ($($step.Status)). See $name-htp.stderr.log."
             }
             $htp = Get-Content -Raw -LiteralPath $htpReport | ConvertFrom-Json
-            $summary.Add(('HTP vs CPU / independent L2: {0:P4} / {1:P4} | max error / CPU peak: {2:P4}' -f
-                $htp.cpu_comparison.relative_l2_error, $htp.relative_l2_error,
-                $htp.cpu_comparison.max_error_fraction_of_reference_peak))
+            $summary.Add(('HTP vs independent reference | L2 {0:P4} | max / reference peak {1:P4}' -f
+                $htp.relative_l2_error, $htp.max_error_fraction_of_reference_peak))
+            if ($htp.cpu_comparison) {
+                $summary.Add(('HTP vs CPU | L2 {0:P4} | max / reference peak {1:P4}' -f
+                    $htp.cpu_comparison.relative_l2_error, $htp.cpu_comparison.max_error_fraction_of_reference_peak))
+            }
             if ($name -eq 'full-ffn') {
                 $summary.Add(('HTP vs CPU: max/P95 {0}/{1:F1} steps | >2 steps {2}/{3}' -f
                     $htp.cpu_comparison.max_error_quantization_steps, $htp.cpu_comparison.p95_error_quantization_steps,
@@ -202,10 +233,12 @@ sys.exit(0 if platform == 'win-arm64' and sys.implementation.name == 'cpython' a
                 $summary.Add(('Host round trip ms (median/P95): {0:F3} / {1:F3} | {2} runs' -f
                     $htp.host_median_ms, $htp.host_p95_ms, $htp.timed_runs))
             }
-            if (!$step.Passed -or $htp.replay_kind -ne $name -or !$htp.accuracy_passed -or !$htp.cpu_comparison.accuracy_passed -or
+            if (!$step.Passed -or $htp.replay_kind -ne $name -or !$htp.accuracy_passed -or
                 $htp.providers -notcontains 'QNNExecutionProvider' -or $htp.qnn_backend_execute_events -lt 1) {
                 throw 'HTP replay requires matching output, QAIRT execution evidence, and a clean process exit.'
             }
+            if (!$cpuPassed) { throw 'HTP diagnostic passed against the independent reference. A valid CPU pairing is still required.' }
+            if (!$htp.cpu_comparison.accuracy_passed) { throw 'HTP comparison to the validated CPU reference failed.' }
             $summary.Add("${name}: PASS")
         } catch {
             $failures += $name

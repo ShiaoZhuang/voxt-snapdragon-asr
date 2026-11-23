@@ -17,7 +17,9 @@ git switch --detach veri-1-auto-handoff
 
 本轮验证 **同一个真实八位置批次的 FFN 和 attention**。脚本同步 `veri/native-win-arm64`，复用现有模型和公开 `zh-plain-1.wav`，编译 ARM64 后端并在 Adreno 上采集第 0 层。FFN 使用逐输出通道 U8 权重、U16 激活。Attention 使用实际 post-RoPE query、缓存中的 K/V 和每个 query 的因果掩码，CPU 和 HTP 分别回放 FP16 分组注意力。两组都禁用 HTP 的 CPU fallback。首次构建可能需要几分钟。
 
-结束后拍回整段 **VOXT SNAPDRAGON REPORT**。两组都会输出误差、QAIRT 后端执行事件、进程状态和延迟，任一组失败时仍会继续另一组。FFN 保留原有门槛。Attention 先检查每个 query 比前一个多看到一个 KV 位置，并与 Adreno 捕获输出核对。CPU 对独立 FP16 参考的相对 L2 门槛为 0.25%，HTP 对同图 CPU 与独立参考均为 0.5%，峰值误差门槛分别为参考峰值的 1% 和 2%。Attention 的缓存来自捕获后的只读视图，连续解码的 KV 提交与回滚另有后续门槛。完整文件在 `Logs` 指向的目录内。
+结束后拍回整段 **VOXT SNAPDRAGON REPORT**。两组都会输出误差、QAIRT 后端执行事件、进程状态和延迟。FFN 保留原有门槛。Attention 先检查每个 query 比前一个多看到一个 KV 位置，并与 Adreno 捕获输出核对。CPU 对独立参考的相对 L2 门槛为 0.25%，HTP 对通过的 CPU 与独立参考均为 0.5%，峰值误差门槛分别为参考峰值的 1% 和 2%。
+
+Attention CPU 首先回放 FP16 图并报告数值。若这组失败，自动用相同 FP16 输入输出、内部 FP32 计算的 CPU 图复核。两条 CPU 路径都失败时，HTP 仍与独立参考比较并保存执行证据，总体报告保留 CPU 对照未通过的状态。Attention 使用捕获后的只读 KV 视图，连续解码的 KV 提交与回滚进入后续验证。完整文件在 `Logs` 指向的目录内。
 
 ## Hexagon HTP 依赖
 

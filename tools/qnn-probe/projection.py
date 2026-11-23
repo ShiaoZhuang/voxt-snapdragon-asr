@@ -139,6 +139,10 @@ def benchmark(args):
         inputs = {"x_u16": feed}
     full_ffn = kind == "full-ffn"
     attention = kind == "attention"
+    if args.attention_cpu_fp32:
+        if not attention or args.backend != "cpu":
+            raise ValueError("--attention-cpu-fp32 requires a CPU attention replay")
+        model = args.replay / "attention_cpu_fp32.onnx"
     options = ort.SessionOptions()
     run_options = ort.RunOptions()
     qnn_version = None
@@ -179,6 +183,7 @@ def benchmark(args):
         compare_run = (partial(compare_attention_output, backend=args.backend) if attention else
                        partial(compare_output, full_ffn_htp=full_ffn_htp))
         comparison = compare_run(actual, expected)
+        independent_accuracy_passed = comparison["accuracy_passed"]
         if args.replay:
             np.save(output / ("actual_f16.npy" if attention else "actual_u16.npy"), actual, allow_pickle=False)
         cpu_comparison = None
@@ -214,9 +219,11 @@ def benchmark(args):
             "weight_shape": WEIGHT_SHAPE if kind == "projection" else None,
             "weight_shapes": (WEIGHT_SHAPE, WEIGHT_SHAPE, WEIGHT_SHAPE[::-1]) if full_ffn else None,
             "replay_kind": kind,
+            "attention_model": model.name if attention else None,
             "providers": session.get_providers(),
             "activation_code_multiplier": None if args.replay else multiplier,
             "cpu_comparison": cpu_comparison,
+            "independent_accuracy_passed": independent_accuracy_passed,
             "max_allowed_error_quantization_steps": None if full_ffn_htp or attention else MAX_ERROR_STEPS,
             "max_allowed_relative_l2": (ATTENTION_MAX_RELATIVE_L2[args.backend] if attention else
                                          FULL_FFN_MAX_RELATIVE_L2 if full_ffn_htp else None),
@@ -249,7 +256,8 @@ def main():
     parser.add_argument("--variant", choices=("default", "lut-off", "wide-a16"), default="default")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--replay", type=Path, help="Prepared real capture QDQ graph and reference")
-    parser.add_argument("--cpu-output", type=Path, help="CPU output from the same replay graph")
+    parser.add_argument("--cpu-output", type=Path, help="CPU output from a paired replay")
+    parser.add_argument("--attention-cpu-fp32", action="store_true", help="Use FP32 CPU arithmetic with the same FP16 inputs and output")
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--runs", type=int, default=30)
     args = parser.parse_args()
