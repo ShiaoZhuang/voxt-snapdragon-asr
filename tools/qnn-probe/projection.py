@@ -16,6 +16,8 @@ INPUT_SHAPE = (8, 2048)
 WEIGHT_SHAPE = (2048, 6144)
 QNN_PROVIDER = "QNNExecutionProvider"
 MAX_ERROR_STEPS = 2
+FULL_FFN_MAX_RELATIVE_L2 = 0.001
+FULL_FFN_MAX_ERROR_OF_PEAK = 0.005
 
 
 def make_fixture(path, activation_multiplier=1):
@@ -52,21 +54,36 @@ def write_projection(path, initializers):
         [helper.make_tensor_value_info("y_u16", TensorProto.UINT16, (INPUT_SHAPE[0], WEIGHT_SHAPE[1]))],
         [numpy_helper.from_array(value, name) for name, value in initializers.items()],
     )
+    save_qdq_graph(graph, path)
+
+
+def save_qdq_graph(graph, path):
     model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 21)], ir_version=10)
     onnx.checker.check_model(model, full_check=True)
     onnx.save_model(model, path)
 
 
-def compare_output(actual, expected):
+def compare_output(actual, expected, *, full_ffn_htp=False):
     if actual.dtype != np.uint16 or actual.shape != expected.shape:
         raise RuntimeError(f"unexpected output: {actual.dtype}, {actual.shape}")
     actual_i32 = actual.astype(np.int32)
-    error = actual_i32 - expected.astype(np.int32)
+    expected_i32 = expected.astype(np.int32)
+    error = actual_i32 - expected_i32
     absolute_error = np.abs(error)
     worst = np.unravel_index(absolute_error.argmax(), absolute_error.shape)
     max_error = int(absolute_error[worst])
+    signal = expected_i32 - 32768
+    relative_l2 = float(np.linalg.norm(error) / max(1, np.linalg.norm(signal)))
+    relative_to_peak = max_error / max(1, int(np.abs(signal).max()))
+    accuracy_passed = max_error <= MAX_ERROR_STEPS
+    if full_ffn_htp:
+        # Rounding and sigmoid approximation can accumulate across the complete FFN.
+        accuracy_passed = (relative_l2 <= FULL_FFN_MAX_RELATIVE_L2 and
+                           relative_to_peak <= FULL_FFN_MAX_ERROR_OF_PEAK)
     return {
-        "accuracy_passed": max_error <= MAX_ERROR_STEPS,
+        "accuracy_passed": accuracy_passed,
+        "relative_l2_error": relative_l2,
+        "max_error_fraction_of_reference_peak": relative_to_peak,
         "max_error_quantization_steps": max_error,
         "p95_error_quantization_steps": float(np.percentile(absolute_error, 95)),
         "mean_signed_error_quantization_steps": float(error.mean()),
@@ -86,10 +103,12 @@ def benchmark(args):
     output.mkdir(parents=True, exist_ok=False)
     # Use more of A16's code range while keeping the exact same real-valued input.
     multiplier = 4096 if args.variant == "wide-a16" else 1
+    full_ffn = False
     if args.replay:
         model = args.replay / "verify_projection.onnx"
         with np.load(args.replay / "input_and_reference.npz", allow_pickle=False) as fixture:
             feed, expected = fixture["feed"], fixture["expected"]
+            full_ffn = "replay_kind" in fixture and fixture["replay_kind"].item() == "full-ffn"
     else:
         model = output / "verify_projection.onnx"
         feed, expected = make_fixture(model, multiplier)
@@ -130,13 +149,14 @@ def benchmark(args):
 
         inputs = {"x_u16": feed}
         actual, = session.run(None, inputs, run_options)
-        comparison = compare_output(actual, expected)
+        full_ffn_htp = full_ffn and args.backend == "htp"
+        comparison = compare_output(actual, expected, full_ffn_htp=full_ffn_htp)
         if args.replay:
             np.save(output / "actual_u16.npy", actual, allow_pickle=False)
         cpu_comparison = None
         if args.cpu_output:
             cpu_output = np.load(args.cpu_output, allow_pickle=False)
-            cpu_comparison = compare_output(actual, cpu_output)
+            cpu_comparison = compare_output(actual, cpu_output, full_ffn_htp=full_ffn_htp)
             comparison["accuracy_passed"] &= cpu_comparison["accuracy_passed"]
         elapsed_ms = []
         if comparison["accuracy_passed"]:
@@ -161,12 +181,17 @@ def benchmark(args):
             "variant": args.variant,
             "onnxruntime": ort.__version__,
             "onnxruntime_qnn": qnn_version,
-            "input_shape": INPUT_SHAPE,
-            "weight_shape": WEIGHT_SHAPE,
+            "input_shape": feed.shape,
+            "output_shape": actual.shape,
+            "weight_shape": None if full_ffn else WEIGHT_SHAPE,
+            "weight_shapes": (WEIGHT_SHAPE, WEIGHT_SHAPE, WEIGHT_SHAPE[::-1]) if full_ffn else None,
+            "replay_kind": "full-ffn" if full_ffn else "projection",
             "providers": session.get_providers(),
             "activation_code_multiplier": None if args.replay else multiplier,
             "cpu_comparison": cpu_comparison,
-            "max_allowed_error_quantization_steps": MAX_ERROR_STEPS,
+            "max_allowed_error_quantization_steps": None if full_ffn_htp else MAX_ERROR_STEPS,
+            "max_allowed_relative_l2": FULL_FFN_MAX_RELATIVE_L2 if full_ffn_htp else None,
+            "max_allowed_error_of_peak": FULL_FFN_MAX_ERROR_OF_PEAK if full_ffn_htp else None,
             **comparison,
             "session_init_ms": init_ms,
             "host_median_ms": float(np.median(elapsed_ms)) if elapsed_ms else None,

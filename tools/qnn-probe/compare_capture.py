@@ -8,14 +8,17 @@ import gguf
 import numpy as np
 
 
-def read_capture(directory):
+def read_capture(directory, *, full_ffn=False):
     manifest = json.loads((directory / "capture.json").read_text(encoding="utf-8"))
     if (manifest["layer"], manifest["dtype"], manifest["input_shape"], manifest["output_shape"]) != (
         0, "float32-le", [8, 2048], [8, 6144]
     ):
         raise ValueError("expected a layer-0 capture of one eight-position verification batch")
     x = np.fromfile(directory / "ffn_norm.f32", dtype="<f4").reshape(8, 2048)
-    y = np.fromfile(directory / "ffn_up.f32", dtype="<f4").reshape(8, 6144)
+    if full_ffn and manifest.get("ffn_output_shape") != [8, 2048]:
+        raise ValueError("capture does not contain a complete layer-0 FFN output")
+    filename, width = ("ffn_out.f32", 2048) if full_ffn else ("ffn_up.f32", 6144)
+    y = np.fromfile(directory / filename, dtype="<f4").reshape(8, width)
     if not np.isfinite(x).all() or not np.isfinite(y).all():
         raise ValueError("capture contains nonfinite values")
     if not np.any(y):
@@ -23,12 +26,19 @@ def read_capture(directory):
     return x, y
 
 
-def load_weight(target):
+def load_weights(target, names):
     reader = gguf.GGUFReader(target)
-    tensor = next((t for t in reader.tensors if t.name == "blk.0.ffn_up.weight"), None)
-    if tensor is None or tuple(tensor.shape) != (2048, 6144) or tensor.tensor_type != gguf.GGMLQuantizationType.Q8_0:
-        raise ValueError("expected the Target's [2048, 6144] Q8_0 FFN up weight")
-    return gguf.dequantize(tensor.data, tensor.tensor_type)
+    available = {tensor.name: tensor for tensor in reader.tensors}
+    for name in names:
+        shape = (6144, 2048) if name == "down" else (2048, 6144)
+        tensor = available.get(f"blk.0.ffn_{name}.weight")
+        if tensor is None or tuple(tensor.shape) != shape or tensor.tensor_type != gguf.GGMLQuantizationType.Q8_0:
+            raise ValueError(f"expected the Target's {shape} Q8_0 FFN {name} weight")
+        yield gguf.dequantize(tensor.data, tensor.tensor_type)
+
+
+def load_weight(target):
+    return next(load_weights(target, ["up"]))
 
 
 def compare(actual, expected):

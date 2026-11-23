@@ -36,12 +36,13 @@ public:
     void begin() {
         input.clear();
         up.clear();
+        output.clear();
         active = true;
     }
 
     void finish(bool decoded, const std::array<int, positions> & tokens, const std::array<int, positions> & pos) {
         active = false;
-        if (!decoded || input.empty() || up.empty()) {
+        if (!decoded || input.empty() || up.empty() || output.empty()) {
             return;
         }
         saved = true;
@@ -51,6 +52,7 @@ public:
             }
             write_tensor("ffn_norm.f32", input);
             write_tensor("ffn_up.f32", up);
+            write_tensor("ffn_out.f32", output);
             std::ofstream manifest(directory / "capture.json");
             manifest.exceptions(std::ios::failbit | std::ios::badbit);
             manifest << common_json({
@@ -59,6 +61,7 @@ public:
                 {"positions", std::vector<int>(pos.begin(), pos.end())},
                 {"input_shape", common_json::array({positions, 2048})},
                 {"output_shape", common_json::array({positions, 6144})},
+                {"ffn_output_shape", common_json::array({positions, 2048})},
             }).dump(2) << '\n';
             manifest.close();
         } catch (const std::exception & error) {
@@ -90,6 +93,9 @@ private:
         if (tensor->ne[0] == 6144 && std::strcmp(name, "ffn_up-0") == 0) {
             return &self.up;
         }
+        if (tensor->ne[0] == 2048 && std::strcmp(name, "ffn_out-0") == 0) {
+            return &self.output;
+        }
         return nullptr;
     }
 
@@ -103,6 +109,7 @@ private:
     std::filesystem::path directory;
     std::vector<float> input;
     std::vector<float> up;
+    std::vector<float> output;
     bool active = false;
     bool saved = false;
 };

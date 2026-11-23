@@ -1,7 +1,7 @@
 # Voxt 骁龙 Windows ARM64 本地 ASR
 status: in-progress
 
-current_handoff: [HANDOFF-20261123-072839-voxt-snapdragon-asr.md](HANDOFF-20261123-072839-voxt-snapdragon-asr.md)
+current_handoff: [HANDOFF-20261123-075426-voxt-snapdragon-asr.md](HANDOFF-20261123-075426-voxt-snapdragon-asr.md)
 
 ## 目标与边界
 保留 Voxt 交互和协议，从干净上游构建 Qwen3-ASR 1.7B + DFlash。旧骁龙原型只提供性能现象参考。
@@ -24,10 +24,12 @@ current_handoff: [HANDOFF-20261123-072839-voxt-snapdragon-asr.md](HANDOFF-202611
 - [x] 骁龙实机确认合成 QNN 投影在 HTP 执行、数值达标并记录 profiling。
 - [x] 捕获真实 DFlash 八位置验证的第一层 FFN 投影并建立 Q8_0 数值参考。
 - [x] 实现真实投影回放与实机交接，完成 Mac 上的 QDQ 图、整数参考和固定入口验证。
-- [ ] 在骁龙 HTP 回放真实激活和真实权重重编码的第一层 FFN 投影。
+- [x] 在骁龙 HTP 回放真实激活和真实权重重编码的第一层 FFN up 投影。
+- [x] 捕获完整 FFN 输出，生成 up、gate、SwiGLU、down QDQ 图并完成 Mac 独立参考校验。
+- [ ] 同一层 FFN 的完整子图在骁龙 HTP 上回放并实测误差与性能。
 - [ ] 完成 Hexagon Target 验证前向的实机可行性与性能报告。
 - [ ] 验收 Windows 桌面听写与实时接口。
 ## Current State
-骁龙合成投影复测通过，固定入口已切换到真实 DFlash 投影回放。
+真实 up 投影实机通过，完整八位置 FFN 回放已准备发布。
 ## 依赖与下一步
-骁龙结果依赖离线实机交接。下一步：骁龙本运行固定入口 update_and_verify.ps1，回传整段 VOXT SNAPDRAGON REPORT，核对采集、重新编码误差和真实投影的 QAIRT 证据。
+骁龙结果依赖离线实机交接。下一步：骁龙本运行固定入口 update_and_verify.ps1，回传整段 VOXT SNAPDRAGON REPORT，验证完整 FFN 的 QAIRT 事件、误差与耗时。

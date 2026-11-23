@@ -8,7 +8,7 @@ param(
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 $summary = [System.Collections.Generic.List[string]]::new()
-$summary.Add('Test: real DFlash verification | layer-0 FFN [8,2048] x [2048,6144] | Adreno capture + HTP replay')
+$summary.Add('Test: real DFlash verification | layer-0 full FFN, eight positions | Adreno capture + HTP replay')
 $source = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '../..')).Path
 
 function Invoke-QnnStep([string]$Exe, [string[]]$Arguments, [string]$Name, [int]$TimeoutSeconds, [switch]$Probe) {
@@ -154,7 +154,7 @@ sys.exit(0 if platform == 'win-arm64' and sys.implementation.name == 'cpython' a
     $toolsDir = Join-Path $source 'tools/qnn-probe'
     $fixture = Join-Path $LogDirectory 'replay-fixture'
     $target = Join-Path $InstallDirectory 'models/target.gguf'
-    Invoke-QnnStep $python @('-X', 'utf8', (Join-Path $toolsDir 'prepare_replay.py'),
+    Invoke-QnnStep $python @('-X', 'utf8', (Join-Path $toolsDir 'prepare_ffn.py'),
         '--capture', $capture, '--target', $target, '--output', $fixture) 'prepare-replay' 180
     $preparation = Get-Content -Raw -LiteralPath (Join-Path $fixture 'preparation.json') | ConvertFrom-Json
     $summary.Add(('Dense Q8_0 vs Adreno capture | relative L2 error: {0:P4}' -f $preparation.dense_vs_native_capture.relative_l2_error))
@@ -168,7 +168,7 @@ sys.exit(0 if platform == 'win-arm64' and sys.implementation.name == 'cpython' a
     $stage = 'CPU QDQ reference'
     Invoke-QnnStep $python ($arguments + @('--backend', 'cpu', '--output', $cpuOutput, '--warmup', '0', '--runs', '1')) 'cpu-replay' 180
     $cpu = Get-Content -Raw -LiteralPath (Join-Path $cpuOutput 'projection_probe.json') | ConvertFrom-Json
-    $summary.Add("CPU QDQ vs integer reference: $($cpu.max_error_quantization_steps) steps max")
+    $summary.Add("CPU QDQ vs independent reference: $($cpu.max_error_quantization_steps) steps max")
 
     $stage = 'HTP QDQ replay'
     $step = Invoke-QnnStep $python ($arguments + @('--backend', 'htp', '--output', $htpOutput,
@@ -181,16 +181,18 @@ sys.exit(0 if platform == 'win-arm64' and sys.implementation.name == 'cpython' a
         throw "No HTP replay result ($($step.Status)). See htp-replay.stderr.log."
     }
     $htp = Get-Content -Raw -LiteralPath $htpReport | ConvertFrom-Json
-    $summary.Add("HTP vs integer reference: $($htp.max_error_quantization_steps) steps max")
-    $summary.Add(('HTP vs CPU QDQ: max/P95 {0}/{1:F1} steps | outside {2}/{3}' -f
+    $summary.Add("HTP vs independent reference: $($htp.max_error_quantization_steps) steps max")
+    $summary.Add(('HTP vs CPU QDQ: max/P95 {0}/{1:F1} steps | >2 steps {2}/{3}' -f
         $htp.cpu_comparison.max_error_quantization_steps, $htp.cpu_comparison.p95_error_quantization_steps,
         $htp.cpu_comparison.output_count_outside_tolerance, $htp.cpu_comparison.output_count))
+    $summary.Add(('HTP vs CPU QDQ: relative L2 {0:P4} | max error / reference peak {1:P4}' -f
+        $htp.cpu_comparison.relative_l2_error, $htp.cpu_comparison.max_error_fraction_of_reference_peak))
     $summary.Add("QAIRT execute events: $($htp.qnn_backend_execute_events) | $($step.Status)")
     if ($htp.timed_runs -gt 0) {
         $summary.Add(('Host round trip ms (median/P95): {0:F3} / {1:F3} | {2} runs' -f
             $htp.host_median_ms, $htp.host_p95_ms, $htp.timed_runs))
     }
-    if (!$step.Passed -or !$htp.accuracy_passed -or !$htp.cpu_comparison.accuracy_passed -or
+    if (!$step.Passed -or $htp.replay_kind -ne 'full-ffn' -or !$htp.accuracy_passed -or !$htp.cpu_comparison.accuracy_passed -or
         $htp.providers -notcontains 'QNNExecutionProvider' -or $htp.qnn_backend_execute_events -lt 1) {
         throw 'HTP replay requires matching output, QAIRT execution evidence, and a clean process exit.'
     }
