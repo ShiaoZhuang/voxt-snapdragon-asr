@@ -1,7 +1,7 @@
 # Voxt 骁龙 Windows ARM64 本地 ASR
 status: in-progress
 
-current_handoff: [HANDOFF-20261123-022859-voxt-snapdragon-asr.md](HANDOFF-20261123-022859-voxt-snapdragon-asr.md)
+current_handoff: [HANDOFF-20261123-061144-voxt-snapdragon-asr.md](HANDOFF-20261123-061144-voxt-snapdragon-asr.md)
 
 ## 目标与边界
 保留 Voxt 交互和协议，从干净上游构建 Qwen3-ASR 1.7B + DFlash。旧骁龙原型只提供性能现象参考。
@@ -20,10 +20,11 @@ current_handoff: [HANDOFF-20261123-022859-voxt-snapdragon-asr.md](HANDOFF-202611
 - [x] 获取 Oryon/Adreno 四组 31 条实机结果，满足质量与接收门槛。
 - [ ] 移植自适应投机回退，并基于骁龙结果测延迟。
 - [x] 完成固定八位置 QNN 投影探针的 CPU 数值对照。
+- [x] 骁龙实机安装并选用 ARM64 Python，完成 QNN 依赖预检。
 - [ ] 骁龙实机确认 QNN 投影在 HTP 执行并记录 profiling。
 - [ ] 完成 Hexagon Target 验证前向的实机可行性与性能报告。
 - [ ] 验收 Windows 桌面听写与实时接口。
 ## Current State
-骁龙 HTP 探针停在 Python 预检，固定入口已加入 ARM64 解释器发现与诊断。
+骁龙实机已通过 ARM64 Python 与依赖预检，HTP 投影输出最大偏差 32 步，已加数值和执行对照。
 ## 依赖与下一步
-骁龙结果依赖离线实机交接。下一步：骁龙本在仓库根目录运行 .\scripts\win-arm64\update_and_verify.ps1，拍回 VOXT SNAPDRAGON REPORT，确认是否选到 ARM64 解释器及是否出现 QAIRT backend execute 事件。
+骁龙结果依赖离线实机交接。下一步：骁龙本运行固定入口 update_and_verify.ps1，回传三组 HTP 的误差、QAIRT 执行事件及进程退出状态。

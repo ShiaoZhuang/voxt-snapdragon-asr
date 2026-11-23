@@ -8,7 +8,7 @@ param(
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 $summary = [System.Collections.Generic.List[string]]::new()
-$summary.Add('Test: Hexagon HTP | 8 x 2048 by 2048 x 6144 QDQ projection')
+$summary.Add('Test: Hexagon HTP | [8,2048] x [2048,6144] QDQ projection diagnostics')
 $source = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '../..')).Path
 
 function Invoke-QnnStep([string]$Exe, [string[]]$Arguments, [string]$Name, [int]$TimeoutSeconds, [switch]$Probe) {
@@ -25,7 +25,7 @@ function Invoke-QnnStep([string]$Exe, [string[]]$Arguments, [string]$Name, [int]
         if (!$Probe) { throw }
         $message = $_.Exception.Message
         [IO.File]::WriteAllText((Join-Path $LogDirectory "$Name.stderr.log"), $message)
-        return @{ Passed = $false; Output = ''; Status = $message }
+        return @{ Passed = $false; Output = ''; Status = $message; Errors = '' }
     }
     try {
         $stdout = $child.StandardOutput.ReadToEndAsync()
@@ -41,7 +41,8 @@ function Invoke-QnnStep([string]$Exe, [string[]]$Arguments, [string]$Name, [int]
 
     if ($Probe) {
         $detail = if ($finished) { "exit $status" } else { "timed out after ${TimeoutSeconds}s" }
-        return @{ Passed = $finished -and $status -eq 0; Output = $output.Trim(); Status = $detail }
+        if ($finished -and $status -lt 0) { $detail += ' (0x{0:X8})' -f $status }
+        return @{ Passed = $finished -and $status -eq 0; Output = $output.Trim(); Status = $detail; Errors = $errors }
     }
     if (!$finished -or $status -ne 0) {
         foreach ($line in @($errors -split '\r?\n' | Where-Object { $_.Trim() } | Select-Object -Last 4)) {
@@ -123,20 +124,50 @@ sys.exit(0 if platform == 'win-arm64' and sys.implementation.name == 'cpython' a
     $stage = 'QNN HTP projection'
     $probe = Join-Path $source 'tools/qnn-probe/projection.py'
     $output = Join-Path $LogDirectory 'qnn-probe'
-    Invoke-QnnStep $python @('-X', 'utf8', $probe, '--backend', 'htp', '--output', $output) 'qnn' 180
-
-    $report = Join-Path $output 'projection_probe.json'
-    $result = Get-Content -Raw -LiteralPath $report | ConvertFrom-Json
-    if ($result.backend -ne 'htp' -or $result.qnn_backend_execute_events -lt 1 -or
-        $result.providers -notcontains 'QNNExecutionProvider') {
-        throw 'QNN projection did not provide HTP execution evidence.'
+    $cases = @(
+        @{ Name = 'cpu-reference'; Backend = 'cpu'; Variant = 'default'; Timing = @('--warmup', '0', '--runs', '1') }
+        @{ Name = 'htp-default'; Backend = 'htp'; Variant = 'default'; Timing = @() }
+        @{ Name = 'htp-lut-off'; Backend = 'htp'; Variant = 'lut-off'; Timing = @() }
+        @{ Name = 'htp-wide-a16'; Backend = 'htp'; Variant = 'wide-a16'; Timing = @() }
+    )
+    $cpuPassed = $false
+    $htpPassed = @()
+    foreach ($case in $cases) {
+        $name = $case.Name
+        $caseOutput = Join-Path $output $name
+        $arguments = @('-X', 'utf8', $probe, '--backend', $case.Backend, '--variant', $case.Variant,
+            '--output', $caseOutput) + $case.Timing
+        $step = Invoke-QnnStep $python $arguments $name 180 -Probe
+        $report = Join-Path $caseOutput 'projection_probe.json'
+        if (!(Test-Path -LiteralPath $report -PathType Leaf)) {
+            $summary.Add("${name}: NO RESULT | $($step.Status)")
+            $lastError = $step.Errors -split '\r?\n' | Where-Object { $_.Trim() } | Select-Object -Last 1
+            if ($lastError) { $summary.Add($lastError.Trim()) }
+            continue
+        }
+        $result = Get-Content -Raw -LiteralPath $report | ConvertFrom-Json
+        $hasHtp = ($result.providers -contains 'QNNExecutionProvider') -and ($result.qnn_backend_execute_events -gt 0)
+        $passed = $step.Passed -and $result.accuracy_passed -and ($result.backend -eq $case.Backend) -and
+            ($result.variant -eq $case.Variant) -and ($case.Backend -eq 'cpu' -or $hasHtp)
+        $verdict = if ($passed) { 'PASS' } else { 'FAIL' }
+        $summary.Add(('  {0}: {1} | max/p95 error {2}/{3:F1} steps | outside {4}/{5} | stride {6}' -f
+            $name, $verdict, $result.max_error_quantization_steps, $result.p95_error_quantization_steps,
+            $result.output_count_outside_tolerance, $result.output_count, $result.actual_output_code_stride))
+        if ($case.Backend -eq 'cpu') {
+            $cpuPassed = $passed
+        } else {
+            $summary.Add("    QAIRT execute events: $($result.qnn_backend_execute_events) | $($step.Status)")
+            if ($result.timed_runs -gt 0) {
+                $summary.Add(('    Host round trip ms (median/p95): {0:F3} / {1:F3} | {2} runs' -f
+                    $result.host_median_ms, $result.host_p95_ms, $result.timed_runs))
+            }
+            if ($passed) { $htpPassed += $name }
+        }
     }
-    $summary.Add("ONNX Runtime $($result.onnxruntime) | QNN EP $($result.onnxruntime_qnn)")
-    $summary.Add("QAIRT backend execute events: $($result.qnn_backend_execute_events)")
-    $summary.Add("Maximum output error: $($result.max_error_quantization_steps) quantization steps")
-    $summary.Add(('Host round trip ms (median/p95): {0:F3} / {1:F3} | {2} runs' -f
-        $result.host_median_ms, $result.host_p95_ms, $result.timed_runs))
-    $summary.Add("Full report: $report")
+    $summary.Add("Projection reports: $output")
+    if (!$cpuPassed) { throw 'CPU reference check failed.' }
+    if (!$htpPassed.Count) { throw 'No HTP case passed accuracy, execution evidence, and clean process exit.' }
+    $summary.Add("Passing HTP cases: $($htpPassed -join ', ')")
 } catch {
     $summary.Add("Failed step: $stage")
     $summary.Add("Error: $($_.Exception.Message)")

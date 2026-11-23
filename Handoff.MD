@@ -15,9 +15,9 @@ git switch --detach veri-1-auto-handoff
 .\scripts\win-arm64\update_and_verify.ps1
 ```
 
-启动脚本从本仓库的 `veri/native-win-arm64` 分支同步最新提交到专用工作目录，再运行该提交指定的验证任务。本轮只验证 Hexagon HTP 的八位置 QDQ 投影。脚本在本机生成小型合成图，输出数值误差、延迟及 ORT 中的 QAIRT backend execute 事件。
+启动脚本从本仓库的 `veri/native-win-arm64` 分支同步最新提交到专用工作目录，再运行该提交指定的验证任务。本轮用一个小型合成投影做 CPU 参考，并在 Hexagon HTP 上比较默认配置、关闭 MatMul LUT、扩大 A16 编码范围三种设置。扩大编码范围保留相同的实数输入，输出误差上限仍是 2 个量化步长。[QNN EP 2.8.0 的 LUT 选项](https://github.com/onnxruntime/onnxruntime-qnn/blob/v2.8.0/docs/execution_providers/QNN-ExecutionProvider.md)
 
-结束后拍屏幕上的 **VOXT SNAPDRAGON REPORT** 整段，包含提交、通过状态、关键错误和日志位置。完整输出、探针报告和文本摘要保存在 `Logs:` 指向的目录。
+结束后拍屏幕上的 **VOXT SNAPDRAGON REPORT** 整段，包含各组误差、QAIRT 执行事件、进程退出状态和日志位置。每组 JSON 报告和 ORT profile 保存在 `Logs:` 指向目录的 `qnn-probe` 子目录。通过条件是 CPU 参考通过，且至少一组 HTP 同时满足数值门槛、有 QAIRT 后端执行事件、进程正常退出。通过数值校验的组才测延迟。
 
 ## Hexagon HTP 依赖
 

@@ -15,19 +15,20 @@ from onnx import TensorProto, helper, numpy_helper
 INPUT_SHAPE = (8, 2048)
 WEIGHT_SHAPE = (2048, 6144)
 QNN_PROVIDER = "QNNExecutionProvider"
+MAX_ERROR_STEPS = 2
 
 
-def make_fixture(path):
+def make_fixture(path, activation_multiplier=1):
     rng = np.random.default_rng(17)
     activation = rng.integers(-5, 6, INPUT_SHAPE, dtype=np.int16)
     weight = rng.integers(-7, 8, WEIGHT_SHAPE, dtype=np.int8)
-    feed = (activation.astype(np.int32) + 32768).astype(np.uint16)
+    feed = (activation.astype(np.int32) * activation_multiplier + 32768).astype(np.uint16)
     # Scales 1/128, 1/64 and 1/1024 give an output quantum of eight accumulator units.
     accum = activation.astype(np.int32) @ weight.astype(np.int32)
     expected = (np.rint(accum / 8).astype(np.int32) + 32768).astype(np.uint16)
     initializers = {
         "w_u8": (weight.astype(np.int16) + 128).astype(np.uint8),
-        "x_scale": np.array(1 / 128, dtype=np.float32),
+        "x_scale": np.array(1 / (128 * activation_multiplier), dtype=np.float32),
         "w_scale": np.array(1 / 64, dtype=np.float32),
         "y_scale": np.array(1 / 1024, dtype=np.float32),
         "x_zero": np.array(32768, dtype=np.uint16),
@@ -52,21 +53,37 @@ def make_fixture(path):
     return feed, expected
 
 
-def check_output(session, feed, expected, run_options):
-    actual, = session.run(None, {"x_u16": feed}, run_options)
+def compare_output(actual, expected):
     if actual.dtype != np.uint16 or actual.shape != expected.shape:
         raise RuntimeError(f"unexpected output: {actual.dtype}, {actual.shape}")
-    max_error = int(np.max(np.abs(actual.astype(np.int32) - expected.astype(np.int32))))
-    if max_error > 2:
-        raise RuntimeError(f"projection output differs by up to {max_error} quantization steps")
-    return max_error
+    actual_i32 = actual.astype(np.int32)
+    error = actual_i32 - expected.astype(np.int32)
+    absolute_error = np.abs(error)
+    worst = np.unravel_index(absolute_error.argmax(), absolute_error.shape)
+    max_error = int(absolute_error[worst])
+    return {
+        "accuracy_passed": max_error <= MAX_ERROR_STEPS,
+        "max_error_quantization_steps": max_error,
+        "p95_error_quantization_steps": float(np.percentile(absolute_error, 95)),
+        "mean_signed_error_quantization_steps": float(error.mean()),
+        "output_count_outside_tolerance": int(np.count_nonzero(absolute_error > MAX_ERROR_STEPS)),
+        "output_count": int(actual.size),
+        "actual_output_range": [int(actual.min()), int(actual.max())],
+        "expected_output_range": [int(expected.min()), int(expected.max())],
+        "actual_output_code_stride": int(np.gcd.reduce((actual_i32 - actual_i32.min()).ravel())),
+        "worst_output_index": [int(i) for i in worst],
+        "worst_expected_code": int(expected[worst]),
+        "worst_actual_code": int(actual[worst]),
+    }
 
 
 def benchmark(args):
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
     model = output / "verify_projection.onnx"
-    feed, expected = make_fixture(model)
+    # Use more of A16's code range while keeping the exact same real-valued input.
+    multiplier = 4096 if args.variant == "wide-a16" else 1
+    feed, expected = make_fixture(model, multiplier)
     options = ort.SessionOptions()
     run_options = ort.RunOptions()
     qnn_version = None
@@ -76,35 +93,43 @@ def benchmark(args):
         qnn_version = qnn.__version__
         ort.register_execution_provider_library(QNN_PROVIDER, qnn.get_library_path())
 
-    session = None
+    session = devices = None
     try:
         if args.backend == "htp":
             devices = [device for device in ort.get_ep_devices() if device.ep_name == QNN_PROVIDER]
             if not devices:
                 raise RuntimeError("QNN execution provider did not expose a device")
             options.add_session_config_entry("session.disable_cpu_ep_fallback", "1")
-            options.add_provider_for_devices(devices, {"backend_path": qnn.get_qnn_htp_path()})
+            provider_options = {
+                "backend_path": qnn.get_qnn_htp_path(),
+                "dump_json_qnn_graph": "1",
+                "json_qnn_graph_dir": str(output),
+            }
+            if args.variant == "lut-off":
+                provider_options["enable_htp_matmul_lut"] = "0"
+            options.add_provider_for_devices(devices, provider_options)
             options.enable_profiling = True
             options.profile_file_prefix = str(output / "ort_profile")
             run_options.add_run_config_entry("qnn.perf_mode", "burst")
 
         start = time.perf_counter()
         providers = ["CPUExecutionProvider"] if args.backend == "cpu" else None
-        session = ort.InferenceSession(str(model), sess_options=options, providers=providers)
+        session = ort.InferenceSession(str(model), sess_options=options, providers=providers, enable_fallback=False)
         init_ms = (time.perf_counter() - start) * 1000
-        session.disable_fallback()
         if args.backend == "htp" and QNN_PROVIDER not in session.get_providers():
             raise RuntimeError(f"QNN provider was not selected: {session.get_providers()}")
 
-        max_error = check_output(session, feed, expected, run_options)
         inputs = {"x_u16": feed}
-        for _ in range(args.warmup):
-            session.run(None, inputs, run_options)
+        actual, = session.run(None, inputs, run_options)
+        comparison = compare_output(actual, expected)
         elapsed_ms = []
-        for _ in range(args.runs):
-            start = time.perf_counter()
-            session.run(None, inputs, run_options)
-            elapsed_ms.append((time.perf_counter() - start) * 1000)
+        if comparison["accuracy_passed"]:
+            for _ in range(args.warmup):
+                session.run(None, inputs, run_options)
+            for _ in range(args.runs):
+                start = time.perf_counter()
+                session.run(None, inputs, run_options)
+                elapsed_ms.append((time.perf_counter() - start) * 1000)
 
         profile_path = None
         htp_events = None
@@ -115,26 +140,33 @@ def benchmark(args):
                 event.get("qnn_operation") == "execute" and event.get("qnn_timing_source") == "BACKEND"
                 for event in (entry.get("args") or {} for entry in profile)
             )
-            if not htp_events:
-                raise RuntimeError(f"no QAIRT backend execute events in {profile_path}")
-
-        return {
+        result = {
             "backend": args.backend,
+            "variant": args.variant,
             "onnxruntime": ort.__version__,
             "onnxruntime_qnn": qnn_version,
             "input_shape": INPUT_SHAPE,
             "weight_shape": WEIGHT_SHAPE,
             "providers": session.get_providers(),
-            "max_error_quantization_steps": max_error,
+            "activation_code_multiplier": multiplier,
+            "max_allowed_error_quantization_steps": MAX_ERROR_STEPS,
+            **comparison,
             "session_init_ms": init_ms,
-            "host_median_ms": float(np.median(elapsed_ms)),
-            "host_p95_ms": float(np.percentile(elapsed_ms, 95)),
+            "host_median_ms": float(np.median(elapsed_ms)) if elapsed_ms else None,
+            "host_p95_ms": float(np.percentile(elapsed_ms, 95)) if elapsed_ms else None,
             "timed_runs": len(elapsed_ms),
             "qnn_backend_execute_events": htp_events,
             "ort_profile": str(profile_path) if profile_path else None,
         }
+        # Flush the result before destroying native objects, which may fail during teardown.
+        text = json.dumps(result, indent=2)
+        report_tmp = output / "projection_probe.json.tmp"
+        report_tmp.write_text(text + "\n", encoding="utf-8")
+        report_tmp.replace(output / "projection_probe.json")
+        print(text, flush=True)
+        return result
     finally:
-        del session
+        del session, options, devices
         if args.backend == "htp":
             ort.unregister_execution_provider_library(QNN_PROVIDER)
 
@@ -142,18 +174,20 @@ def benchmark(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--backend", choices=("cpu", "htp"), default="htp")
+    parser.add_argument("--variant", choices=("default", "lut-off", "wide-a16"), default="default")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--runs", type=int, default=30)
     args = parser.parse_args()
     if args.warmup < 0 or args.runs < 1:
         parser.error("warmup must be nonnegative and runs must be positive")
+    if args.backend == "cpu" and args.variant == "lut-off":
+        parser.error("lut-off is an HTP option")
     if args.backend == "htp" and (platform.system() != "Windows" or platform.machine().lower() not in ("arm64", "aarch64")):
         parser.error("HTP requires Windows ARM64 Python")
     result = benchmark(args)
-    text = json.dumps(result, indent=2)
-    (args.output / "projection_probe.json").write_text(text + "\n", encoding="utf-8")
-    print(text)
+    if not result["accuracy_passed"] or (args.backend == "htp" and not result["qnn_backend_execute_events"]):
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

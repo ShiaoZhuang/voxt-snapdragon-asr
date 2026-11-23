@@ -1,16 +1,17 @@
 # 晓龙 ASR 任务索引
-Last updated: 2026-11-23 02:28:59 US/Pacific
+Last updated: 2026-11-23 06:11:44 US/Pacific
 
 ## 项目与文档
 Voxt Windows ARM64 本地听写。[项目计划](../PLAN.md) · [跟踪协议](README.md)
 ## Active Tasks
-- [Voxt 骁龙本地 ASR](TASK-20261121-voxt-snapdragon-asr.md) — in-progress，骁龙 HTP 探针停在 Python 预检，固定入口已加入 ARM64 解释器发现与诊断。
+- [Voxt 骁龙本地 ASR](TASK-20261121-voxt-snapdragon-asr.md) — in-progress，骁龙实机已通过 ARM64 Python 与依赖预检，HTP 投影输出最大偏差 32 步，已加数值和执行对照。
 ## Source Checkpoint
-- 移植项目：veri/native-win-arm64 @ 3bbfb70477e3700829543b023026854dd56b650b（写入本轮检查点前）。
+- 移植项目：veri/native-win-arm64 @ 9ff331834127aace2595d0f66ff80321e284079a（写入本轮检查点前）。
 - sglang-omni：feat/dflash-profile-benchmark @ 6efb1212b6e1196ed1140040d9e4e3069f6cb0a8，Capture.swift 有已有修改。
 ## Latest checkpoint
-[HANDOFF-20261123-022859-voxt-snapdragon-asr.md](HANDOFF-20261123-022859-voxt-snapdragon-asr.md)
+[HANDOFF-20261123-061144-voxt-snapdragon-asr.md](HANDOFF-20261123-061144-voxt-snapdragon-asr.md)
 ## Handoff Registry
+- [HANDOFF-20261123-061144-voxt-snapdragon-asr.md](HANDOFF-20261123-061144-voxt-snapdragon-asr.md) → [Voxt 骁龙本地 ASR](TASK-20261121-voxt-snapdragon-asr.md)
 - [HANDOFF-20261123-022859-voxt-snapdragon-asr.md](HANDOFF-20261123-022859-voxt-snapdragon-asr.md) → [Voxt 骁龙本地 ASR](TASK-20261121-voxt-snapdragon-asr.md)
 - [HANDOFF-20261123-021805-voxt-snapdragon-asr.md](HANDOFF-20261123-021805-voxt-snapdragon-asr.md) → [Voxt 骁龙本地 ASR](TASK-20261121-voxt-snapdragon-asr.md)
 - [HANDOFF-20261123-015905-voxt-snapdragon-asr.md](HANDOFF-20261123-015905-voxt-snapdragon-asr.md) → [Voxt 骁龙本地 ASR](TASK-20261121-voxt-snapdragon-asr.md)
