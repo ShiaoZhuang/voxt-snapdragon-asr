@@ -16,6 +16,9 @@ function Invoke-QnnStep([string]$Exe, [string[]]$Arguments, [string]$Name, [int]
     $start.WorkingDirectory = $source
     $start.Arguments = ($Arguments | ForEach-Object { '"' + ($_ -replace '(\\+)$', '$1$1') + '"' }) -join ' '
     $start.EnvironmentVariables['PYTHON_MANAGER_AUTOMATIC_INSTALL'] = 'false'
+    if ($Name -eq 'target-replay') {
+        $start.EnvironmentVariables['OPENBLAS_NUM_THREADS'] = '4'
+    }
     $start.UseShellExecute = $false
     $start.RedirectStandardOutput = $true
     $start.RedirectStandardError = $true
@@ -77,6 +80,15 @@ function Get-InstalledPython {
         if (!$listing.Passed) { $summary.Add("Python launcher listing: $($listing.Status)") }
         foreach ($line in ($listing.Output -split '\r?\n')) {
             if ($line -match '((?:[a-z]:\\|\\\\)[^"\r\n]+?\.exe)"?\s*$') { $Matches[1] }
+        }
+    }
+}
+
+function Get-TargetJournal([string]$Directory) {
+    $journal = Join-Path $Directory 'target-layers.jsonl'
+    if (Test-Path -LiteralPath $journal -PathType Leaf) {
+        Get-Content -LiteralPath $journal | ForEach-Object {
+            try { $_ | ConvertFrom-Json -ErrorAction Stop } catch {}
         }
     }
 }
@@ -176,13 +188,50 @@ sys.exit(0 if platform == 'win-arm64' and sys.implementation.name == 'cpython' a
     $target = Join-Path $InstallDirectory 'models/target.gguf'
     $draft = Join-Path $InstallDirectory 'models/draft-4.gguf'
     $targetDir = Join-Path $LogDirectory 'target-replay'
+    $previous = Get-ChildItem -LiteralPath (Split-Path -Parent $LogDirectory) -Directory |
+        Where-Object { $_.Name -lt (Split-Path -Leaf $LogDirectory) } | Sort-Object Name -Descending | Select-Object -First 1
+    if ($previous) {
+        $previousTarget = Join-Path $previous.FullName 'target-replay'
+        if (!(Test-Path -LiteralPath (Join-Path $previousTarget 'target_replay.json') -PathType Leaf)) {
+            $previousEntries = @(Get-TargetJournal $previousTarget)
+            if ($previousEntries.Count) {
+                $summary.Add("Previous incomplete replay | saved: $($previousEntries.Count) | last layer: $($previousEntries[-1].layer)")
+            }
+        }
+    }
     $targetStep = Invoke-QnnStep $python @('-X', 'utf8', (Join-Path $toolsDir 'replay_target.py'),
-        '--capture', $capture, '--target', $target, '--draft', $draft, '--output', $targetDir) 'target-replay' 1200 -Probe
+        '--capture', $capture, '--target', $target, '--draft', $draft, '--output', $targetDir) 'target-replay' 360 -Probe
+    $progressPath = Join-Path $targetDir 'target-progress.json'
+    if (Test-Path -LiteralPath $progressPath -PathType Leaf) {
+        $progress = Get-Content -Raw -LiteralPath $progressPath | ConvertFrom-Json
+        if ($progress.phase -ne 'complete') {
+            $where = if ($null -ne $progress.layer) { "layer $($progress.layer) | " } else { '' }
+            $detail = ''
+            if ($progress.worker) {
+                $phasePath = Join-Path $targetDir "$($progress.worker).phase.txt"
+                if (Test-Path -LiteralPath $phasePath -PathType Leaf) {
+                    $detail = ' | ' + (Get-Content -Raw -LiteralPath $phasePath).Trim()
+                }
+            }
+            $summary.Add("Last recorded step: $where$($progress.phase)$detail")
+        }
+    }
+    $isolatedPath = Join-Path $targetDir 'last-layer-isolated.json'
+    if (Test-Path -LiteralPath $isolatedPath -PathType Leaf) {
+        $isolated = Get-Content -Raw -LiteralPath $isolatedPath | ConvertFrom-Json
+        if ($isolated.htp_vs_cpu_same_input) {
+            $summary.Add(('Isolated last layer | HTP/CPU L2 {0:P3} | HTP/Adreno L2 {1:P3} | QAIRT executes {2}' -f
+                $isolated.htp_vs_cpu_same_input.relative_l2_error, $isolated.htp_chain_vs_native.relative_l2_error,
+                $isolated.qaairt_execute_events))
+        }
+        if ($isolated.error) { $summary.Add("Isolated last layer error: $($isolated.error)") }
+    }
     $targetReport = Join-Path $targetDir 'target_replay.json'
     if (Test-Path -LiteralPath $targetReport -PathType Leaf) {
         $replay = Get-Content -Raw -LiteralPath $targetReport | ConvertFrom-Json
         $chain = if ($replay.chain_complete) { 'complete' } else { 'interrupted' }
         $summary.Add("Decoder chain: $chain | HTP $($replay.htp_layers_passed)/$($replay.layer_count) | CPU $($replay.cpu_layers_passed)/$($replay.layer_count)")
+        if ($replay.budget_exhausted) { $summary.Add("Decoder time budget reached | checked $($replay.layers_checked)/$($replay.layer_count) layers") }
         $summary.Add(('QAIRT executes: {0} | HTP layer medians summed: {1:F2} ms' -f
             $replay.htp_events, $replay.htp_layer_ms_sum))
         $last = $replay.last_layer
@@ -201,14 +250,15 @@ sys.exit(0 if platform == 'win-arm64' and sys.implementation.name == 'cpython' a
             }
             if ($stages) { $summary.Add("Last layer largest stage L2: $($stages -join ' | ')") }
         }
-        if ($last.htp_isolated_vs_cpu) {
-            $summary.Add(('Last layer L2 | isolated HTP/CPU {0:P3} | isolated HTP/Adreno {1:P3} | chain HTP/Adreno {2:P3}' -f
-                $last.htp_isolated_vs_cpu.relative_l2_error, $last.htp_isolated_vs_native.relative_l2_error,
-                $last.htp_chain_vs_native.relative_l2_error))
-        }
-        if ($replay.chain_complete) {
+        if ($replay.logits.native_hidden) {
             $logits = $replay.logits
-            $summary.Add("Logits top-1 vs Adreno | native-hidden $($logits.native_hidden.matches)/8 | CPU $($logits.cpu_chain.matches)/8 | HTP chain $($logits.htp_chain.matches)/8 | HTP last only $($logits.htp_isolated.matches)/8")
+            $matches = foreach ($name in @('native_hidden', 'cpu_chain', 'htp_chain', 'htp_isolated')) {
+                if ($logits.$name) { "$name=$($logits.$name.matches)/8" }
+            }
+            $summary.Add("Logits top-1 vs Adreno | $($matches -join ' | ')")
+        }
+        if ($replay.logits.htp_chain) {
+            $logits = $replay.logits
             $summary.Add(('HTP logits relative L2: {0:P3} | IDs: {1}' -f
                 $logits.htp_chain.relative_l2_error, ($logits.htp_chain.top1 -join ',')))
             if ($logits.htp_chain.matches -ne 8) { $summary.Add("Adreno IDs: $($replay.native_top1 -join ',')") }
@@ -217,6 +267,7 @@ sys.exit(0 if platform == 'win-arm64' and sys.implementation.name == 'cpython' a
             }
             $summary.Add("DFlash auxiliary input relative L2: $($aux -join ' | ')")
         }
+        if ($replay.logits_error) { $summary.Add("Host logits error: $($replay.logits_error)") }
         if ($replay.failed_layers.Count) { $summary.Add("Failed layers (zero-indexed): $($replay.failed_layers -join ',')") }
         foreach ($entry in ($replay.native_reference_failures.PSObject.Properties | Select-Object -First 2)) {
             $summary.Add("Layer $($entry.Name) native reference failed: $($entry.Value -join ', ')")
@@ -228,13 +279,22 @@ sys.exit(0 if platform == 'win-arm64' and sys.implementation.name == 'cpython' a
             $summary.Add('Target replay: PASS')
             return
         }
-        if ($replay.chain_complete) {
-            throw "Target replay completed but did not pass ($($targetStep.Status)). See $targetReport"
+        if ($replay.passed) {
+            foreach ($line in ($targetStep.Errors -split '\r?\n' | Where-Object { $_.Trim() } | Select-Object -Last 2)) {
+                $summary.Add($line.Trim())
+            }
         }
+        throw "Target replay did not pass ($($targetStep.Status)). See $targetReport"
     } else {
+        $entries = @(Get-TargetJournal $targetDir)
+        if ($entries.Count) {
+            $passedLayers = @($entries | Where-Object passed)
+            $summary.Add("Saved layer results: $($entries.Count) | passed: $($passedLayers.Count)")
+        }
         foreach ($line in ($targetStep.Errors -split '\r?\n' | Where-Object { $_.Trim() } | Select-Object -Last 3)) {
             $summary.Add($line.Trim())
         }
+        if ($progress) { throw "Target replay stopped ($($targetStep.Status)). See $targetDir" }
     }
     $summary.Add("Target replay: FAIL ($($targetStep.Status)) | running layer-0 diagnostics")
     $failures = @('target-replay')

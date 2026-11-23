@@ -3,6 +3,8 @@
 import argparse
 import json
 from pathlib import Path
+import subprocess
+import sys
 from tempfile import TemporaryDirectory
 import time
 
@@ -13,9 +15,12 @@ import onnxruntime as ort
 from compare_capture import compare
 from prepare_decoder_layer import normalize, prepare
 from projection import (
-    ATTENTION_MAX_ERROR_OF_PEAK, ATTENTION_MAX_RELATIVE_L2, INPUT_SHAPE, QNN_PROVIDER,
-    compare_output, htp_execute_events, htp_session_options,
+    ATTENTION_MAX_ERROR_OF_PEAK, ATTENTION_MAX_RELATIVE_L2, INPUT_SHAPE, compare_output,
 )
+
+
+HTP_TIMEOUT_SECONDS = 45
+REPLAY_BUDGET_SECONDS = 270
 
 
 def load_hidden(path):
@@ -35,27 +40,39 @@ def compare_codes(actual, reference, backend):
     return {key: result[key] for key in ("relative_l2_error", "max_error_fraction_of_reference_peak", "accuracy_passed")}
 
 
-def run_htp(qnn, model, profile, feeds, *, native_feeds=None):
-    options, run_options, devices = htp_session_options(qnn, profile)
-    session = ort.InferenceSession(str(model), sess_options=options, enable_fallback=False)
-    try:
-        if QNN_PROVIDER not in session.get_providers():
-            raise RuntimeError(f"QNN provider was not selected: {session.get_providers()}")
-        session.run(None, feeds, run_options)  # Warm the static layer before timing it.
-        times = []
-        for _ in range(3):
-            start = time.perf_counter()
-            output, = session.run(None, feeds, run_options)
-            times.append((time.perf_counter() - start) * 1000)
-        native_output = None
-        if native_feeds is not None:
-            native_output, = session.run(None, native_feeds, run_options)
-        return output, float(np.median(times)), htp_execute_events(session.end_profiling()), native_output
-    finally:
-        del session, options, devices
+def run_htp(model, profile, feeds, timeout):
+    request, response = (model.parent / name for name in ("htp_request.npz", "htp_response.npz"))
+    np.savez(request, **feeds)
+    worker = Path(__file__).with_name("target_htp_worker.py")
+    command = [sys.executable, "-X", "utf8", str(worker), *map(str, (model, request, profile, response))]
+    error = None
+    stderr_path = profile.with_suffix(".stderr.log")
+    with profile.with_suffix(".stdout.log").open("wb") as stdout, stderr_path.open("wb") as stderr:
+        try:
+            process = subprocess.run(command, stdout=stdout, stderr=stderr, timeout=timeout, check=False)
+            if process.returncode:
+                error = f"HTP worker exit {process.returncode} (0x{process.returncode & 0xffffffff:08X})"
+        except subprocess.TimeoutExpired:
+            error = f"HTP worker timed out after {timeout:.1f}s"
+    if error:
+        phase_file = profile.with_suffix(".phase.txt")
+        phase = phase_file.read_text(encoding="utf-8").strip() if phase_file.is_file() else "start worker"
+        error += f" at {phase} ({profile.name})"
+        if error.startswith("HTP worker exit"):
+            with stderr_path.open("rb") as stderr:
+                stderr.seek(max(0, stderr_path.stat().st_size - 1024))
+                tail = stderr.read().decode("utf-8", errors="replace").rstrip().splitlines()
+            if tail:
+                error += f": {tail[-1][-240:]}"
+    if not response.is_file():
+        return None, None, 0, error or "HTP worker returned no result"
+    with np.load(response, allow_pickle=False) as data:
+        return data["output"], float(data["median_ms"]), int(data["events"]), error
 
 
-def run_layer(capture, target, layer, directory, cpu_hidden, htp_hidden, qnn, profile, *, final=False):
+def run_layer(capture, target, layer, directory, cpu_hidden, htp_hidden, use_htp, profile, progress,
+              *, final=False, timeout=HTP_TIMEOUT_SECONDS):
+    progress("prepare graph")
     feeds, expected, prep = prepare(
         capture, target, directory, full=True, layer=layer, activation_code_limit=24576, verbose=False,
         allow_reference_mismatch=True)
@@ -71,6 +88,7 @@ def run_layer(capture, target, layer, directory, cpu_hidden, htp_hidden, qnn, pr
     native = load_hidden(capture / "layer_out.f32")
     # Graphs use the same code range on both backends. Keep headroom for chained states.
     scale = prep["output_scale"]
+    progress("CPU reference")
     options = ort.SessionOptions()
     options.intra_op_num_threads = 4
     session = ort.InferenceSession(str(directory / "attention_cpu_fp32.onnx"), sess_options=options,
@@ -87,17 +105,20 @@ def run_layer(capture, target, layer, directory, cpu_hidden, htp_hidden, qnn, pr
         "cpu_chain_vs_native": compare(next_cpu, native),
         "cpu_output_clipped": bool(np.any((cpu_codes == 0) | (cpu_codes == 65535))),
     }
-    if not qnn:
-        return next_cpu, None, None, result
-
     htp_feeds = feeds
     cpu_pair = captured_codes
-    if htp_hidden is not None:
+    if use_htp and htp_hidden is not None:
         htp_feeds = {**feeds, "residual": htp_hidden}
         cpu_pair, = session.run(None, htp_feeds)
-    htp_codes, median, events, native_codes = run_htp(
-        qnn, directory / "verify_projection.onnx", profile, htp_feeds,
-        native_feeds=feeds if final and htp_hidden is not None else None)
+    del session, options
+    if not use_htp:
+        return next_cpu, None, result
+    progress("HTP worker", profile.name)
+    htp_codes, median, events, error = run_htp(directory / "verify_projection.onnx", profile, htp_feeds, timeout)
+    if error:
+        result["error"] = error
+    if htp_codes is None:
+        return next_cpu, None, result
     next_htp = hidden_from_codes(htp_codes, scale)
     result.update({
         "htp_vs_cpu_same_input": compare_codes(htp_codes, cpu_pair, "htp"),
@@ -106,15 +127,7 @@ def run_layer(capture, target, layer, directory, cpu_hidden, htp_hidden, qnn, pr
         "host_median_ms": median,
         "qaairt_execute_events": events,
     })
-    isolated_htp = None
-    if final:
-        native_codes = htp_codes if native_codes is None else native_codes
-        isolated_htp = hidden_from_codes(native_codes, scale)
-        result["htp_isolated_vs_native"] = compare(isolated_htp, native)
-        result["htp_isolated_vs_cpu"] = compare_codes(native_codes, captured_codes, "htp")
-        result["passed_isolated_htp"] = (result["htp_isolated_vs_cpu"]["accuracy_passed"] and
-                                         not np.any((native_codes == 0) | (native_codes == 65535)))
-    return next_cpu, next_htp, isolated_htp, result
+    return next_cpu, next_htp, result
 
 
 def read_head(target, columns):
@@ -150,8 +163,21 @@ def score_logits(target, native_logits, states):
     return reference_ids.tolist(), results
 
 
-def run(args, qnn):
+def write_json(path, value):
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
+    temporary.replace(path)
+
+
+def run(args, use_htp):
     args.output.mkdir(parents=True, exist_ok=False)
+    deadline = time.monotonic() + REPLAY_BUDGET_SECONDS
+    progress_path = args.output / "target-progress.json"
+
+    def progress(phase, *, layer=None, worker=None):
+        write_json(progress_path, {"phase": phase, "layer": layer, "worker": worker})
+
+    progress("read captured batch and models")
     manifest = json.loads((args.capture / "capture.json").read_text(encoding="utf-8"))
     target = gguf.GGUFReader(args.target)
     layer_count = int(target.get_field("qwen3vl.block_count").contents())
@@ -166,16 +192,44 @@ def run(args, qnn):
     if not aux_layers or any(not 0 <= i < layer_count for i in aux_layers):
         raise ValueError(f"invalid DFlash auxiliary layers: {aux_layers}")
 
+    last_index = layer_count - 1
+    last_folder = args.capture if last_index == 0 else args.capture / f"layer-{last_index}"
+    native_last = load_hidden(last_folder / "layer_out.f32")
+    isolated_htp = None
+    isolated = None
+    if use_htp:
+        def isolated_progress(phase, worker=None):
+            progress(f"isolated last layer: {phase}", layer=last_index, worker=worker)
+
+        try:
+            with TemporaryDirectory(prefix="last-isolated-", dir=args.output) as temporary:
+                _, isolated_htp, isolated = run_layer(
+                    last_folder, target, last_index, Path(temporary) / "fixture", None, None, True,
+                    args.output / "htp-last-isolated", isolated_progress, final=True, timeout=HTP_TIMEOUT_SECONDS)
+        except Exception as error:
+            isolated = {"error": f"{type(error).__name__}: {error}"}
+        write_json(args.output / "last-layer-isolated.json", isolated)
+
     checked = []
     aux = {}
-    cpu_hidden = htp_hidden = native_output = isolated_htp = None
-    connected = True
+    cpu_hidden = htp_hidden = native_output = None
+    cpu_connected = htp_connected = True
     passing = True
+    budget_exhausted = False
     with (args.output / "target-layers.jsonl").open("w", encoding="utf-8", buffering=1) as log:
         for layer in range(layer_count):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                budget_exhausted = True
+                break
             folder = args.capture if layer == 0 else args.capture / f"layer-{layer}"
             result = {"layer": layer}
+
+            def layer_progress(phase, worker=None):
+                progress(phase, layer=layer, worker=worker)
+
             try:
+                layer_progress("validate capture")
                 native_input = load_hidden(folder / "attention_residual.f32")
                 if native_output is not None and not np.array_equal(native_input, native_output):
                     raise ValueError("native layer output does not equal the following layer input")
@@ -185,53 +239,75 @@ def run(args, qnn):
                     if htp_hidden is not None:
                         aux[layer]["htp_chain_vs_native"] = compare(htp_hidden, native_input)
                 with TemporaryDirectory(prefix=f"layer-{layer}-", dir=args.output) as temporary:
-                    cpu_hidden, htp_hidden, isolated_htp, metrics = run_layer(
-                        folder, target, layer, Path(temporary) / "fixture", cpu_hidden, htp_hidden, qnn,
-                        args.output / f"htp-layer-{layer}", final=layer == layer_count - 1)
+                    run_device = use_htp and (layer != last_index or isolated_htp is not None)
+                    cpu_hidden, htp_hidden, metrics = run_layer(
+                        folder, target, layer, Path(temporary) / "fixture", cpu_hidden, htp_hidden, run_device,
+                        args.output / f"htp-layer-{layer}", layer_progress,
+                        final=layer == last_index, timeout=min(HTP_TIMEOUT_SECONDS, remaining))
                 result.update(metrics)
                 result["passed"] = (metrics["cpu_vs_independent"]["accuracy_passed"] and
                                     not metrics["cpu_output_clipped"] and not metrics["native_reference"]["failed_checks"])
-                if qnn:
-                    result["passed"] &= (metrics["htp_vs_cpu_same_input"]["accuracy_passed"] and
-                                         metrics["qaairt_execute_events"] > 0 and not metrics["htp_output_clipped"] and
-                                         metrics.get("passed_isolated_htp", True))
+                if use_htp:
+                    if not run_device:
+                        result["error"] = "Chained last-layer HTP skipped after isolated execution produced no result"
+                    htp_connected &= htp_hidden is not None
+                    result["passed"] &= htp_passed(metrics)
             except Exception as error:
                 # Continue from the next native snapshot so one broken layer cannot hide later ones.
                 result.update(passed=False, error=f"{type(error).__name__}: {error}")
                 cpu_hidden = htp_hidden = native_output = None
-                connected = False
+                cpu_connected = htp_connected = False
             checked.append(result)
             passing &= result["passed"]
             log.write(json.dumps(result) + "\n")
             print(f"Decoder {layer + 1}/{layer_count}: {'PASS' if result['passed'] else 'FAIL'}", flush=True)
 
+    cpu_complete = cpu_connected and len(checked) == layer_count
+    htp_complete = use_htp and htp_connected and len(checked) == layer_count
+    connected = htp_complete if use_htp else cpu_complete
     report = {
         "backend": args.backend, "layer_count": layer_count, "chain_complete": connected,
+        "layers_checked": len(checked), "budget_exhausted": budget_exhausted,
+        "last_isolated": isolated,
         "cpu_layers_passed": sum(bool(info.get("cpu_vs_independent", {}).get("accuracy_passed")) for info in checked),
-        "htp_layers_passed": sum(bool(info.get("htp_vs_cpu_same_input", {}).get("accuracy_passed"))
-                                 and info.get("qaairt_execute_events", 0) > 0 for info in checked) if qnn else None,
+        "htp_layers_passed": sum(htp_passed(info) for info in checked) if use_htp else None,
         "failed_layers": [info["layer"] for info in checked if not info["passed"]],
         "errors": {info["layer"]: info["error"] for info in checked if "error" in info},
         "native_reference_failures": {info["layer"]: info["native_reference"]["failed_checks"] for info in checked
                                       if info.get("native_reference", {}).get("failed_checks")},
-        "last_layer": checked[-1],
-        "htp_layer_ms_sum": sum(info.get("host_median_ms", 0) for info in checked) if qnn else None,
-        "htp_events": sum(info.get("qaairt_execute_events", 0) for info in checked) if qnn else None,
+        "last_layer": checked[-1] if len(checked) == layer_count else None,
+        "htp_layer_ms_sum": sum(info.get("host_median_ms", 0) for info in checked) if use_htp else None,
+        "htp_events": sum(info.get("qaairt_execute_events", 0) for info in checked) if use_htp else None,
         "aux": aux,
         "logits": {},
     }
-    if connected:
-        states = {"native_hidden": native_output, "cpu_chain": cpu_hidden}
-        if qnn:
-            states["htp_chain"] = htp_hidden
-            states["htp_isolated"] = isolated_htp
+    states = {"native_hidden": native_last}
+    if cpu_complete:
+        states["cpu_chain"] = cpu_hidden
+    if htp_complete:
+        states["htp_chain"] = htp_hidden
+    if isolated_htp is not None:
+        states["htp_isolated"] = isolated_htp
+    write_json(args.output / "target_replay.json", {**report, "passed": False})
+    progress("host logits")
+    try:
         report["native_top1"], report["logits"] = score_logits(target, native_logits, states)
         passing &= all(result["matches"] == INPUT_SHAPE[0] for name, result in report["logits"].items()
                        if name != "htp_isolated")
         passing &= len(aux) == len(aux_layers)
-    report["passed"] = passing and connected
-    (args.output / "target_replay.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    except Exception as error:
+        report["logits_error"] = f"{type(error).__name__}: {error}"
+        passing = False
+    report["passed"] = passing and connected and (not use_htp or htp_passed(isolated))
+    write_json(args.output / "target_replay.json", report)
+    progress("complete")
     return report["passed"]
+
+
+def htp_passed(metrics):
+    return (bool(metrics.get("htp_vs_cpu_same_input", {}).get("accuracy_passed")) and
+            metrics.get("qaairt_execute_events", 0) > 0 and not metrics["htp_output_clipped"] and
+            not metrics.get("error"))
 
 
 def main():
@@ -240,15 +316,7 @@ def main():
     for name in ("capture", "target", "draft", "output"):
         parser.add_argument(f"--{name}", required=True, type=Path)
     args = parser.parse_args()
-    if args.backend == "cpu":
-        return 0 if run(args, None) else 1
-    import onnxruntime_qnn as qnn
-
-    ort.register_execution_provider_library(QNN_PROVIDER, qnn.get_library_path())
-    try:
-        return 0 if run(args, qnn) else 1
-    finally:
-        ort.unregister_execution_provider_library(QNN_PROVIDER)
+    return 0 if run(args, args.backend == "htp") else 1
 
 
 if __name__ == "__main__":
