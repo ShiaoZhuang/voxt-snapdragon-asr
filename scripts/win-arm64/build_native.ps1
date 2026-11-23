@@ -113,17 +113,33 @@ $build = (New-Item -ItemType Directory -Path $BuildDirectory -Force).FullName
 $null = New-Item -ItemType Directory -Path (Join-Path $build 'src') -Force
 $bin = (New-Item -ItemType Directory -Path (Join-Path $build 'bin') -Force).FullName
 $lock = Get-Content -Raw -LiteralPath (Join-Path $root 'sources.lock.json') | ConvertFrom-Json
-$patch = Join-Path $root 'patches/llama-voxt.patch'
+$patchSource = Join-Path $root 'patches/llama-voxt.patch'
+$patch = Join-Path $build 'llama-voxt.patch'
+# Existing worktrees may still have CRLF even after Git's attributes change.
+$patchText = [IO.File]::ReadAllText($patchSource).Replace("`r`n", "`n")
+[IO.File]::WriteAllText($patch, $patchText, [Text.UTF8Encoding]::new($false))
 $patchId = (Get-FileHash -LiteralPath $patch -Algorithm SHA256).Hash.Substring(0,12).ToLowerInvariant()
 $python = (Get-Command python -CommandType Application | Select-Object -First 1).Source
 $clangVersion = (Invoke-BuildTool clang @('--version') | Select-Object -First 1)
 $sourceCommit = Invoke-BuildTool git @('-C', $root, 'rev-parse', 'HEAD')
-$llama = Get-PinnedSource "llama-$patchId" $lock.llama_cpp.repo $lock.llama_cpp.commit
+$llamaRevision = $lock.llama_cpp.commit
+$llamaRepo = $lock.llama_cpp.repo
+$revisionId = $llamaRevision.Substring(0,12)
+$sourceRoot = Join-Path $build 'src'
+if (!(Test-Path -LiteralPath (Join-Path $sourceRoot "llama-$patchId-$revisionId"))) {
+    $cached = Get-ChildItem -LiteralPath $sourceRoot -Filter "llama-*-$revisionId" -Directory |
+        Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName '.git') -PathType Container } | Select-Object -First 1
+    if ($cached -and (Invoke-BuildTool git @('-C', $cached.FullName, 'rev-parse', 'HEAD')) -eq $llamaRevision) {
+        $llamaRepo = $cached.FullName
+        Write-Host "Reusing cached llama.cpp source at $llamaRepo"
+    }
+}
+$llama = Get-PinnedSource "llama-$patchId" $llamaRepo $llamaRevision
 $changes = @(Invoke-BuildTool git @('-C', $llama, 'status', '--porcelain'))
 if (!$changes.Count) {
-    Invoke-BuildTool git @('-C', $llama, 'apply', '--whitespace=nowarn', $patch)
+    Invoke-BuildTool git @('-C', $llama, '-c', 'core.autocrlf=false', 'apply', '--whitespace=nowarn', $patch)
 } else {
-    Invoke-BuildTool git @('-C', $llama, 'apply', '--reverse', '--check', $patch)
+    Invoke-BuildTool git @('-C', $llama, '-c', 'core.autocrlf=false', 'apply', '--reverse', '--check', $patch)
 }
 $headers = Get-PinnedSource 'OpenCL-Headers' $lock.opencl.headers.repo $lock.opencl.headers.commit
 $icd = Get-PinnedSource 'OpenCL-ICD-Loader' $lock.opencl.loader.repo $lock.opencl.loader.commit

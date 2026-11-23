@@ -35,11 +35,16 @@ def main():
         checkout.mkdir()
         paths = ["Voxt/internal", "Voxt/go.mod", "Voxt/go.sum"] if args.runner_only else ["Voxt", "sglang_omni_mlx"]
         archive = Path(staging) / "source.tar"
-        subprocess.run(["git", "-C", str(repo), "archive", f"--output={archive}", revision, *paths], check=True)
+        subprocess.run(
+            ["git", "-C", str(repo), "-c", "core.autocrlf=false", "archive", f"--output={archive}", revision, *paths],
+            check=True,
+        )
         shutil.unpack_archive(archive, checkout)
         patch_args = ["--include=Voxt/internal/omni/*"] if args.runner_only else []
+        patch = Path(staging) / "voxt-mlx-baseline.patch"
+        patch.write_bytes((root / "patches/voxt-mlx-baseline.patch").read_bytes().replace(b"\r\n", b"\n"))
         subprocess.run(
-            ["git", "apply", "--no-index", *patch_args, str(root / "patches/voxt-mlx-baseline.patch")],
+            ["git", "-c", "core.autocrlf=false", "apply", "--no-index", *patch_args, str(patch)],
             cwd=checkout, env={**os.environ, "GIT_CEILING_DIRECTORIES": staging}, check=True,
         )
         if not args.runner_only:
