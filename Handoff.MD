@@ -2,14 +2,16 @@
 
 ## 骁龙本从源码构建与验收
 
-使用公司批准的开发工具，在面向 ARM64 目标的 Visual Studio Developer PowerShell 中打开源码仓库根目录。已有的 Visual Studio C++ ARM64 组件和 Windows SDK 可以直接复用。构建还需要 `clang`、`clang++`、CMake、Ninja、Git、Python 3.11+ 和 Go 1.27.1+。脚本先检查命令是否可用，首次构建会拉取固定版本的上游源码和 Go 模块。[Visual Studio ARM64 工具链](https://learn.microsoft.com/en-us/visualstudio/install/visual-studio-on-arm-devices)
+在骁龙本的 PowerShell 中打开源码仓库根目录。脚本会定位已安装的 Visual Studio，尝试初始化 ARM64 开发环境，并查找常见安装目录下的 CMake、Ninja、Clang 和 Go。也可从已配置 ARM64 的 Visual Studio Developer PowerShell 直接运行。首次构建会拉取固定版本的上游源码和 Go 模块。[Visual Studio 开发人员 PowerShell](https://learn.microsoft.com/en-us/visualstudio/ide/reference/command-prompt-powershell)
 
 ```powershell
-git fetch origin tag veri-1-native-arm64
-git switch --detach veri-1-native-arm64
+git fetch origin tag veri-1-native-toolchain
+git switch --detach veri-1-native-toolchain
 .\scripts\win-arm64\build_native.ps1
 .\scripts\win-arm64\run_verify.ps1 -NativeBuildDirectory .\build\win-arm64-native -Quick
 ```
+
+如果工具检查报错，可以用 `build_native.ps1 -ToolchainCheck` 单独查看命令路径和缺失项。Visual Studio 的 **C++ CMake tools for Windows** 提供 CMake/Ninja，**C++ Clang Compiler for Windows** 提供 Clang。Go 1.27.1+ 和 Python 3.11+ 使用公司批准的安装。只需补齐脚本仍报告缺少的工具。
 
 构建在骁龙本生成后端、OpenCL loader 和评测器。继续使用 `dist\voxt-snapdragon-veri-1` 的现有模型、评测集和资产清单。若资产在其他目录，用 `-InstallDirectory` 指向该目录。复验通过条件为四组快测 PASS，OpenCL DFlash 有候选被接收并与同设备的 Target-only 逐 token 一致。
 

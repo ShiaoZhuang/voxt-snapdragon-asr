@@ -1,20 +1,75 @@
 [CmdletBinding()]
 param(
     [string]$BuildDirectory = (Join-Path $PSScriptRoot '../../build/win-arm64-native'),
-    [ValidateRange(1,64)][int]$Jobs = 6
+    [ValidateRange(1,64)][int]$Jobs = 6,
+    [switch]$ToolchainCheck
 )
 
 $ErrorActionPreference = 'Stop'
 $osArch = $env:PROCESSOR_ARCHITEW6432
 if (!$osArch) { $osArch = $env:PROCESSOR_ARCHITECTURE }
 if ($env:OS -ne 'Windows_NT' -or $osArch -ne 'ARM64') {
-    throw 'Run this script on Windows ARM64 from Visual Studio Developer PowerShell.'
+    throw 'Run this script on Windows ARM64.'
 }
 $root = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '../..')).Path
+$programRoots = @(${env:ProgramFiles(x86)}, $env:ProgramW6432, $env:ProgramFiles) | Where-Object { $_ } | Select-Object -Unique
+$vsInstall = $env:VSINSTALLDIR
+if ($env:VSCMD_ARG_TGT_ARCH -ne 'arm64') {
+    if (!$vsInstall) {
+        $vswhere = (Get-Command vswhere.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1).Source
+        if (!$vswhere) {
+            $vswhere = $programRoots | ForEach-Object { Join-Path $_ 'Microsoft Visual Studio/Installer/vswhere.exe' } |
+                Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+        }
+        if ($vswhere) {
+            $vsInstall = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.ARM64 -property installationPath |
+                Select-Object -First 1
+        }
+    }
+    if ($vsInstall) {
+        $devShell = Join-Path $vsInstall 'Common7/Tools/Launch-VsDevShell.ps1'
+        if (Test-Path -LiteralPath $devShell -PathType Leaf) {
+            & $devShell -Arch arm64 -SkipAutomaticLocation | Out-Host
+        }
+    }
+}
+
+# Keep the active PATH first and fill in tools installed in standard locations.
+$toolDirs = @(foreach ($programRoot in $programRoots) {
+    Join-Path $programRoot 'Go/bin'
+    Join-Path $programRoot 'CMake/bin'
+    Join-Path $programRoot 'LLVM/bin'
+})
+if ($env:LOCALAPPDATA) { $toolDirs += Join-Path $env:LOCALAPPDATA 'Programs/Go/bin' }
+if ($vsInstall) {
+    $toolDirs += @(
+        (Join-Path $vsInstall 'Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin')
+        (Join-Path $vsInstall 'Common7/IDE/CommonExtensions/Microsoft/CMake/Ninja')
+        (Join-Path $vsInstall 'VC/Tools/Llvm/ARM64/bin')
+        (Join-Path $vsInstall 'VC/Tools/Llvm/bin')
+        (Join-Path $vsInstall 'VC/Tools/Llvm/x64/bin')
+    )
+}
+$pathDirs = @($env:PATH -split [IO.Path]::PathSeparator)
+$env:PATH = ($pathDirs + @($toolDirs | Where-Object { Test-Path -LiteralPath $_ -PathType Container }) | Select-Object -Unique) -join [IO.Path]::PathSeparator
+
+Write-Host "Visual Studio: $vsInstall | target: $($env:VSCMD_ARG_TGT_ARCH)"
 $toolNames = @('git', 'cmake', 'ninja', 'clang', 'clang++', 'python', 'go')
-$missing = @($toolNames | Where-Object { !(Get-Command $_ -CommandType Application -ErrorAction SilentlyContinue) })
-if ($missing.Count) { throw "Missing tools: $($missing -join ', '). Use your approved development tools." }
-if ($env:VSCMD_ARG_TGT_ARCH -ne 'arm64') { throw 'Enter the Visual Studio Developer PowerShell configured for the ARM64 target.' }
+$missing = @(foreach ($name in $toolNames) {
+    $tool = Get-Command $name -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($tool) { Write-Host "  $name = $($tool.Source)" }
+    else { $name }
+})
+$problems = @()
+if ($env:VSCMD_ARG_TGT_ARCH -ne 'arm64') {
+    $problems += 'Visual Studio ARM64 environment unavailable. Open your installed Developer PowerShell with the ARM64 target.'
+}
+if ($missing.Count) { $problems += "Tools still missing: $($missing -join ', '). Check approved installations or PATH." }
+if ($problems.Count) { throw ($problems -join [Environment]::NewLine) }
+if ($ToolchainCheck) {
+    Write-Output 'Toolchain commands found. Run again without -ToolchainCheck to build.'
+    return
+}
 
 function Invoke-BuildTool([string]$Tool, [string[]]$Arguments) {
     & $Tool @Arguments
