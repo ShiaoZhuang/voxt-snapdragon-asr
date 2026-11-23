@@ -21,7 +21,9 @@ git switch --detach veri-1-auto-handoff
 
 ## Hexagon HTP 依赖
 
-固定脚本使用已安装的 Windows ARM64 Python 3.11–3.14，首次运行自动创建 `.local/qnn-probe-venv`，从本机配置的 pip 软件源安装 `tools/qnn-probe/requirements-win-arm64.txt` 中锁定的包。后续会复用该环境。依赖安装失败时，摘要会标出这个阶段，原始输出在 `qnn-dependencies.stdout.log` 和 `qnn-dependencies.stderr.log`。[QNN EP v2.8.0 安装说明](https://github.com/onnxruntime/onnxruntime-qnn/tree/v2.8.0#install)
+固定脚本从现有项目环境、PATH、Windows 注册信息和 `py` 启动器中查找标准版 Windows ARM64 CPython 3.11–3.14。屏幕摘要会列出已检查的解释器路径、平台和版本。若显示 `No compatible Python found`，请安装公司允许使用的 Windows ARM64 CPython 3.14，再运行同一条验证命令。[Python 3.14.10 官方下载页](https://www.python.org/downloads/release/python-31410/)
+
+脚本会创建或复用 `.local` 下的隔离环境，从本机配置的 pip 软件源安装 `tools/qnn-probe/requirements-win-arm64.txt` 中锁定的包。依赖安装失败时，原始输出在 `qnn-dependencies.stdout.log` 和 `qnn-dependencies.stderr.log`。[QNN EP v2.8.0 安装说明](https://github.com/onnxruntime/onnxruntime-qnn/tree/v2.8.0#install)
 
 探针包含一个独立的整数参考校验，目标是确认 QNN 在 HTP 上实际执行一种与 ASR Target 同尺寸的投影，为真实权重和 KV 回放建立运行时基线。
 
