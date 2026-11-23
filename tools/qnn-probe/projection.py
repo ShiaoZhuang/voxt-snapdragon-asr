@@ -35,10 +35,15 @@ def make_fixture(path, activation_multiplier=1):
         "w_zero": np.array(128, dtype=np.uint8),
         "y_zero": np.array(32768, dtype=np.uint16),
     }
+    write_projection(path, initializers)
+    return feed, expected
+
+
+def write_projection(path, initializers):
     graph = helper.make_graph(
         [
             helper.make_node("DequantizeLinear", ["x_u16", "x_scale", "x_zero"], ["x"], name="ActivationDQ"),
-            helper.make_node("DequantizeLinear", ["w_u8", "w_scale", "w_zero"], ["w"], name="WeightDQ"),
+            helper.make_node("DequantizeLinear", ["w_u8", "w_scale", "w_zero"], ["w"], name="WeightDQ", axis=1),
             helper.make_node("MatMul", ["x", "w"], ["y"], name="FFNProjection"),
             helper.make_node("QuantizeLinear", ["y", "y_scale", "y_zero"], ["y_u16"], name="OutputQ"),
         ],
@@ -50,7 +55,6 @@ def make_fixture(path, activation_multiplier=1):
     model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 21)], ir_version=10)
     onnx.checker.check_model(model, full_check=True)
     onnx.save_model(model, path)
-    return feed, expected
 
 
 def compare_output(actual, expected):
@@ -80,10 +84,15 @@ def compare_output(actual, expected):
 def benchmark(args):
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
-    model = output / "verify_projection.onnx"
     # Use more of A16's code range while keeping the exact same real-valued input.
     multiplier = 4096 if args.variant == "wide-a16" else 1
-    feed, expected = make_fixture(model, multiplier)
+    if args.replay:
+        model = args.replay / "verify_projection.onnx"
+        with np.load(args.replay / "input_and_reference.npz", allow_pickle=False) as fixture:
+            feed, expected = fixture["feed"], fixture["expected"]
+    else:
+        model = output / "verify_projection.onnx"
+        feed, expected = make_fixture(model, multiplier)
     options = ort.SessionOptions()
     run_options = ort.RunOptions()
     qnn_version = None
@@ -122,6 +131,13 @@ def benchmark(args):
         inputs = {"x_u16": feed}
         actual, = session.run(None, inputs, run_options)
         comparison = compare_output(actual, expected)
+        if args.replay:
+            np.save(output / "actual_u16.npy", actual, allow_pickle=False)
+        cpu_comparison = None
+        if args.cpu_output:
+            cpu_output = np.load(args.cpu_output, allow_pickle=False)
+            cpu_comparison = compare_output(actual, cpu_output)
+            comparison["accuracy_passed"] &= cpu_comparison["accuracy_passed"]
         elapsed_ms = []
         if comparison["accuracy_passed"]:
             for _ in range(args.warmup):
@@ -148,7 +164,8 @@ def benchmark(args):
             "input_shape": INPUT_SHAPE,
             "weight_shape": WEIGHT_SHAPE,
             "providers": session.get_providers(),
-            "activation_code_multiplier": multiplier,
+            "activation_code_multiplier": None if args.replay else multiplier,
+            "cpu_comparison": cpu_comparison,
             "max_allowed_error_quantization_steps": MAX_ERROR_STEPS,
             **comparison,
             "session_init_ms": init_ms,
@@ -176,6 +193,8 @@ def main():
     parser.add_argument("--backend", choices=("cpu", "htp"), default="htp")
     parser.add_argument("--variant", choices=("default", "lut-off", "wide-a16"), default="default")
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--replay", type=Path, help="Prepared real capture QDQ graph and reference")
+    parser.add_argument("--cpu-output", type=Path, help="CPU output from the same replay graph")
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--runs", type=int, default=30)
     args = parser.parse_args()
@@ -183,6 +202,10 @@ def main():
         parser.error("warmup must be nonnegative and runs must be positive")
     if args.backend == "cpu" and args.variant == "lut-off":
         parser.error("lut-off is an HTP option")
+    if args.replay and args.variant != "default":
+        parser.error("replay takes its encoding from the prepared graph")
+    if args.cpu_output and (not args.replay or args.backend != "htp"):
+        parser.error("--cpu-output requires an HTP replay")
     if args.backend == "htp" and (platform.system() != "Windows" or platform.machine().lower() not in ("arm64", "aarch64")):
         parser.error("HTP requires Windows ARM64 Python")
     result = benchmark(args)

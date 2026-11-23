@@ -8,7 +8,7 @@ param(
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 $summary = [System.Collections.Generic.List[string]]::new()
-$summary.Add('Test: Hexagon HTP | [8,2048] x [2048,6144] QDQ projection diagnostics')
+$summary.Add('Test: real DFlash verification | layer-0 FFN [8,2048] x [2048,6144] | Adreno capture + HTP replay')
 $source = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '../..')).Path
 
 function Invoke-QnnStep([string]$Exe, [string[]]$Arguments, [string]$Name, [int]$TimeoutSeconds, [switch]$Probe) {
@@ -121,53 +121,79 @@ sys.exit(0 if platform == 'win-arm64' and sys.implementation.name == 'cpython' a
         '--only-binary=:all:', '-r', $requirements) 'qnn-dependencies' 900
     $summary.Add('QNN Python dependencies: PASS')
 
-    $stage = 'QNN HTP projection'
-    $probe = Join-Path $source 'tools/qnn-probe/projection.py'
-    $output = Join-Path $LogDirectory 'qnn-probe'
-    $cases = @(
-        @{ Name = 'cpu-reference'; Backend = 'cpu'; Variant = 'default'; Timing = @('--warmup', '0', '--runs', '1') }
-        @{ Name = 'htp-default'; Backend = 'htp'; Variant = 'default'; Timing = @() }
-        @{ Name = 'htp-lut-off'; Backend = 'htp'; Variant = 'lut-off'; Timing = @() }
-        @{ Name = 'htp-wide-a16'; Backend = 'htp'; Variant = 'wide-a16'; Timing = @() }
-    )
-    $cpuPassed = $false
-    $htpPassed = @()
-    foreach ($case in $cases) {
-        $name = $case.Name
-        $caseOutput = Join-Path $output $name
-        $arguments = @('-X', 'utf8', $probe, '--backend', $case.Backend, '--variant', $case.Variant,
-            '--output', $caseOutput) + $case.Timing
-        $step = Invoke-QnnStep $python $arguments $name 180 -Probe
-        $report = Join-Path $caseOutput 'projection_probe.json'
-        if (!(Test-Path -LiteralPath $report -PathType Leaf)) {
-            $summary.Add("${name}: NO RESULT | $($step.Status)")
-            $lastError = $step.Errors -split '\r?\n' | Where-Object { $_.Trim() } | Select-Object -Last 1
-            if ($lastError) { $summary.Add($lastError.Trim()) }
-            continue
-        }
-        $result = Get-Content -Raw -LiteralPath $report | ConvertFrom-Json
-        $hasHtp = ($result.providers -contains 'QNNExecutionProvider') -and ($result.qnn_backend_execute_events -gt 0)
-        $passed = $step.Passed -and $result.accuracy_passed -and ($result.backend -eq $case.Backend) -and
-            ($result.variant -eq $case.Variant) -and ($case.Backend -eq 'cpu' -or $hasHtp)
-        $verdict = if ($passed) { 'PASS' } else { 'FAIL' }
-        $summary.Add(('  {0}: {1} | max/p95 error {2}/{3:F1} steps | outside {4}/{5} | stride {6}' -f
-            $name, $verdict, $result.max_error_quantization_steps, $result.p95_error_quantization_steps,
-            $result.output_count_outside_tolerance, $result.output_count, $result.actual_output_code_stride))
-        if ($case.Backend -eq 'cpu') {
-            $cpuPassed = $passed
-        } else {
-            $summary.Add("    QAIRT execute events: $($result.qnn_backend_execute_events) | $($step.Status)")
-            if ($result.timed_runs -gt 0) {
-                $summary.Add(('    Host round trip ms (median/p95): {0:F3} / {1:F3} | {2} runs' -f
-                    $result.host_median_ms, $result.host_p95_ms, $result.timed_runs))
-            }
-            if ($passed) { $htpPassed += $name }
+    $stage = 'Replay assets'
+    $assets = Get-Content -Raw -LiteralPath (Join-Path $InstallDirectory 'verify_manifest.json') | ConvertFrom-Json
+    foreach ($relative in @('models/target.gguf', 'models/mmproj.gguf', 'models/draft-4.gguf', 'eval/zh-plain-1.wav')) {
+        $path = Join-Path $InstallDirectory $relative
+        $expectedHash = $assets.files.$relative
+        if (!$expectedHash -or (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -ne $expectedHash) {
+            throw "SHA-256 mismatch: $relative"
         }
     }
-    $summary.Add("Projection reports: $output")
-    if (!$cpuPassed) { throw 'CPU reference check failed.' }
-    if (!$htpPassed.Count) { throw 'No HTP case passed accuracy, execution evidence, and clean process exit.' }
-    $summary.Add("Passing HTP cases: $($htpPassed -join ', ')")
+    $summary.Add('Installed model and clip hashes: PASS')
+
+    $stage = 'Native build'
+    & (Join-Path $PSScriptRoot 'build_native.ps1') -BuildDirectory $BuildDirectory -BackendOnly | Out-Host
+    $summary.Add('Native ARM64 backend build: PASS')
+
+    $stage = 'Adreno DFlash capture'
+    $capture = Join-Path $LogDirectory 'verify-capture'
+    $captureLog = Join-Path $LogDirectory 'adreno-capture.txt'
+    & (Join-Path $PSScriptRoot 'probe_opencl_startup.ps1') -InstallDirectory $InstallDirectory `
+        -NativeBuildDirectory $BuildDirectory -Transcribe -Draft -CaptureDirectory $capture -ReportPath $captureLog | Out-Host
+    $captureDetails = Get-Content -Encoding UTF8 -LiteralPath $captureLog
+    foreach ($line in ($captureDetails -match '^(Capture:|Transcription probe:|Exit code:|Startup probe error:)')) {
+        $summary.Add($line)
+    }
+    if (!($captureDetails -match '^Capture: PASS') -or !($captureDetails -match '^Transcription probe: PASS$') -or
+        !($captureDetails -match '^Exit code: 0 \(0x00000000\)$')) {
+        throw "Adreno DFlash capture did not complete. See $captureLog"
+    }
+
+    $stage = 'Prepare QDQ replay'
+    $toolsDir = Join-Path $source 'tools/qnn-probe'
+    $fixture = Join-Path $LogDirectory 'replay-fixture'
+    $target = Join-Path $InstallDirectory 'models/target.gguf'
+    Invoke-QnnStep $python @('-X', 'utf8', (Join-Path $toolsDir 'prepare_replay.py'),
+        '--capture', $capture, '--target', $target, '--output', $fixture) 'prepare-replay' 180
+    $preparation = Get-Content -Raw -LiteralPath (Join-Path $fixture 'preparation.json') | ConvertFrom-Json
+    $summary.Add(('Dense Q8_0 vs Adreno capture | relative L2 error: {0:P4}' -f $preparation.dense_vs_native_capture.relative_l2_error))
+    $summary.Add(('A16/U8 re-encoding vs dense Q8_0 | relative L2 error: {0:P4} | {1} weight scales' -f
+        $preparation.qdq_vs_dense_q8_0.relative_l2_error, $preparation.weight_scale_count))
+
+    $probe = Join-Path $toolsDir 'projection.py'
+    $cpuOutput = Join-Path $LogDirectory 'cpu-replay'
+    $htpOutput = Join-Path $LogDirectory 'htp-replay'
+    $arguments = @('-X', 'utf8', $probe, '--replay', $fixture)
+    $stage = 'CPU QDQ reference'
+    Invoke-QnnStep $python ($arguments + @('--backend', 'cpu', '--output', $cpuOutput, '--warmup', '0', '--runs', '1')) 'cpu-replay' 180
+    $cpu = Get-Content -Raw -LiteralPath (Join-Path $cpuOutput 'projection_probe.json') | ConvertFrom-Json
+    $summary.Add("CPU QDQ vs integer reference: $($cpu.max_error_quantization_steps) steps max")
+
+    $stage = 'HTP QDQ replay'
+    $step = Invoke-QnnStep $python ($arguments + @('--backend', 'htp', '--output', $htpOutput,
+        '--cpu-output', (Join-Path $cpuOutput 'actual_u16.npy'))) 'htp-replay' 180 -Probe
+    $htpReport = Join-Path $htpOutput 'projection_probe.json'
+    if (!(Test-Path -LiteralPath $htpReport -PathType Leaf)) {
+        foreach ($line in ($step.Errors -split '\r?\n' | Where-Object { $_.Trim() } | Select-Object -Last 2)) {
+            $summary.Add($line.Trim())
+        }
+        throw "No HTP replay result ($($step.Status)). See htp-replay.stderr.log."
+    }
+    $htp = Get-Content -Raw -LiteralPath $htpReport | ConvertFrom-Json
+    $summary.Add("HTP vs integer reference: $($htp.max_error_quantization_steps) steps max")
+    $summary.Add(('HTP vs CPU QDQ: max/P95 {0}/{1:F1} steps | outside {2}/{3}' -f
+        $htp.cpu_comparison.max_error_quantization_steps, $htp.cpu_comparison.p95_error_quantization_steps,
+        $htp.cpu_comparison.output_count_outside_tolerance, $htp.cpu_comparison.output_count))
+    $summary.Add("QAIRT execute events: $($htp.qnn_backend_execute_events) | $($step.Status)")
+    if ($htp.timed_runs -gt 0) {
+        $summary.Add(('Host round trip ms (median/P95): {0:F3} / {1:F3} | {2} runs' -f
+            $htp.host_median_ms, $htp.host_p95_ms, $htp.timed_runs))
+    }
+    if (!$step.Passed -or !$htp.accuracy_passed -or !$htp.cpu_comparison.accuracy_passed -or
+        $htp.providers -notcontains 'QNNExecutionProvider' -or $htp.qnn_backend_execute_events -lt 1) {
+        throw 'HTP replay requires matching output, QAIRT execution evidence, and a clean process exit.'
+    }
 } catch {
     $summary.Add("Failed step: $stage")
     $summary.Add("Error: $($_.Exception.Message)")

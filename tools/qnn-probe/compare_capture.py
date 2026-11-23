@@ -39,9 +39,14 @@ def compare(actual, expected):
     }
 
 
-def round_trip_symmetric(data, max_code, axis=None):
+def symmetric_codes(data, max_code, axis=None):
     scale = np.maximum(np.max(np.abs(data), axis=axis, keepdims=True) / max_code, np.finfo(np.float32).tiny)
-    return np.clip(np.rint(data / scale), -max_code, max_code) * scale
+    return np.clip(np.rint(data / scale), -max_code, max_code).astype(np.int32), scale
+
+
+def round_trip_symmetric(data, max_code, axis=None):
+    codes, scale = symmetric_codes(data, max_code, axis)
+    return codes.astype(np.float32) * scale
 
 
 def main():

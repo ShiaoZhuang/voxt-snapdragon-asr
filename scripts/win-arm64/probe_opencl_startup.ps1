@@ -3,12 +3,18 @@ param(
     [string]$InstallDirectory = (Join-Path $PSScriptRoot '../../dist/voxt-snapdragon-veri-1'),
     [string]$ReportPath = (Join-Path ([IO.Path]::GetTempPath()) ('voxt-opencl-startup-' + (Get-Date -Format 'yyyyMMdd-HHmmss-fff') + '.txt')),
     [string]$NativeBuildDirectory,
+    [string]$CaptureDirectory,
     [switch]$Transcribe,
     [switch]$Draft
 )
 
 $ErrorActionPreference = 'Stop'
 $ReportPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ReportPath)
+if ($CaptureDirectory) {
+    if (!$Draft -or !$Transcribe) { throw 'Capture requires -Draft and -Transcribe.' }
+    $CaptureDirectory = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($CaptureDirectory)
+    if (Test-Path -LiteralPath $CaptureDirectory) { throw "Capture directory already exists: $CaptureDirectory" }
+}
 $serverName = 'qwen3_asr_server.exe'
 $since = (Get-Date).AddDays(-2)
 
@@ -39,6 +45,16 @@ function Invoke-ClipProbe([int]$Port, [string]$Audio) {
                 Where-Object type -eq 'transcript.text.done' | Select-Object -Last 1
             if (!$response.IsSuccessStatusCode -or !($events -contains '[DONE]') -or !$done.text -or !$done.generation_metadata) {
                 throw 'Expected a nonempty transcript and a complete SSE response with generation metadata.'
+            }
+            if ($CaptureDirectory) {
+                $capture = Get-Content -Raw -LiteralPath (Join-Path $CaptureDirectory 'capture.json') | ConvertFrom-Json
+                $round = $done.generation_metadata.first_verify_rounds | Where-Object { @($_.proposals).Count -eq 7 } |
+                    Select-Object -First 1
+                $tokens = @($round.anchor) + @($round.proposals)
+                if (!$round -or ($capture.tokens -join ',') -ne ($tokens -join ',') -or @($capture.positions).Count -ne 8) {
+                    throw 'Capture tokens did not match the first full DFlash verification round.'
+                }
+                "Capture: PASS | layer $($capture.layer) | positions $($capture.positions[0])-$($capture.positions[7])"
             }
             'Transcription probe: PASS'
         } finally { $response.Dispose() }
@@ -92,6 +108,7 @@ function Invoke-ClipProbe([int]$Port, [string]$Audio) {
             $start.EnvironmentVariables['VOXT_ASR_TRACE'] = '1'
             $start.EnvironmentVariables['OMNI_DFLASH_PROFILE'] = '1'
         }
+        if ($CaptureDirectory) { $start.EnvironmentVariables['VOXT_VERIFY_CAPTURE_DIR'] = $CaptureDirectory }
         $child = [Diagnostics.Process]::Start($start)
         "Started PID: $($child.Id)"
         $stderr = $child.StandardError.ReadToEndAsync()

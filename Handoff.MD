@@ -1,4 +1,4 @@
-# Veri 1 骁龙实机验收
+# Voxt 骁龙实机验收
 
 ## 固定入口
 
@@ -15,9 +15,9 @@ git switch --detach veri-1-auto-handoff
 .\scripts\win-arm64\update_and_verify.ps1
 ```
 
-启动脚本从本仓库的 `veri/native-win-arm64` 分支同步最新提交到专用工作目录，再运行该提交指定的验证任务。本轮用一个小型合成投影做 CPU 参考，并在 Hexagon HTP 上比较默认配置、关闭 MatMul LUT、扩大 A16 编码范围三种设置。扩大编码范围保留相同的实数输入，输出误差上限仍是 2 个量化步长。[QNN EP 2.8.0 的 LUT 选项](https://github.com/onnxruntime/onnxruntime-qnn/blob/v2.8.0/docs/execution_providers/QNN-ExecutionProvider.md)
+本轮验证 **真实 DFlash 八位置投影回放**。脚本同步最新的 `veri/native-win-arm64`，复用已安装的模型和公开 `zh-plain-1.wav`，在骁龙本上编译 ARM64 后端并用 Adreno 捕获首个完整验证批次。随后从原 `target.gguf` 读取第 0 层 FFN 权重，在本地生成逐输出通道 U8 权重、U16 激活的 QDQ 子图。CPU 和 Hexagon HTP 回放同一个子图。首次构建可能需要几分钟，期间可在 `Live logs` 目录查看日志。
 
-结束后拍屏幕上的 **VOXT SNAPDRAGON REPORT** 整段，包含各组误差、QAIRT 执行事件、进程退出状态和日志位置。每组 JSON 报告和 ORT profile 保存在 `Logs:` 指向目录的 `qnn-probe` 子目录。通过条件是 CPU 参考通过，且至少一组 HTP 同时满足数值门槛、有 QAIRT 后端执行事件、进程正常退出。通过数值校验的组才测延迟。
+结束后拍回整段 **VOXT SNAPDRAGON REPORT**。摘要包含真实批次位置、重新编码误差、同一 QDQ 图的 HTP 与 CPU 差异、QAIRT 后端执行事件和延迟。通过要求捕获与 DFlash token 日志一致，CPU 与独立整数参考、HTP 与 CPU 及整数参考的最大误差都在 2 步内，并且 HTP 有 QAIRT 后端执行事件、进程正常退出。完整文件在 `Logs` 指向的目录内。该验收的范围是一个 FFN 投影，输入和输出 scale 由本轮捕获样本确定。
 
 ## Hexagon HTP 依赖
 
@@ -25,7 +25,7 @@ git switch --detach veri-1-auto-handoff
 
 脚本会创建或复用 `.local` 下的隔离环境，从本机配置的 pip 软件源安装 `tools/qnn-probe/requirements-win-arm64.txt` 中锁定的包。依赖安装失败时，原始输出在 `qnn-dependencies.stdout.log` 和 `qnn-dependencies.stderr.log`。[QNN EP v2.8.0 安装说明](https://github.com/onnxruntime/onnxruntime-qnn/tree/v2.8.0#install)
 
-探针包含一个独立的整数参考校验，目标是确认 QNN 在 HTP 上实际执行一种与 ASR Target 同尺寸的投影，为真实权重和 KV 回放建立运行时基线。
+新加的 `gguf` 包仅用于读取本地原始权重。模型、捕获数据、临时 ONNX 和日志都留在本机。
 
 ## 骁龙本从源码构建与验收
 
