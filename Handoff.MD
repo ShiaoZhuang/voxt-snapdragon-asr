@@ -15,14 +15,13 @@ git switch --detach veri-1-auto-handoff
 .\scripts\win-arm64\update_and_verify.ps1
 ```
 
-脚本同步 `veri/native-win-arm64`，在骁龙本编译一次，复用现有模型和公开 `zh-plain-1.wav`，采集一次 Adreno 八位置验证批次。同一次运行会验证两张图：
+脚本同步 `veri/native-win-arm64`，用已安装的工具链在骁龙本编译一次。从公开 `zh-plain-1.wav` 转录中采集一个真实的八位置验证批次，保存全部 28 层的原生边界、历史 K/V 和 logits。
 
-- `full-decoder` 从隐藏状态开始，执行 RMSNorm、Q/K/V 投影、Q/K 归一化、应用由采集位置计算的 M-RoPE 旋转、KV 追加、attention、输出投影、残差和 SwiGLU FFN。
-- `decoder-layer` 从采集的 post-RoPE Q/K/V 开始，提供上一轮已过实机的对照。若这项失败，同一次运行继续收集 FFN 与 attention 子图诊断。
+同一次运行把 28 个独立的 HTP 层会话串起来，上一层的隐藏输出作为下一层输入。每层使用采集的 Adreno 历史 K/V，在 HTP 上计算当前八位置的 K/V 和隐藏输出。CPU 运行小批次 QDQ 数值对照。禁用 HTP 的 CPU fallback，各层都检查 QAIRT 执行记录。最后用主机上的原 Q8_0 词表投影比较八个位置的 logits、top-1 token，以及 DFlash 消费的三处辅助隐藏输入。
 
-两张图都复用各自的推理会话验证 KV 可见性。脚本扰动被屏蔽的历史列，以及模拟接受 0、1、3 个候选时被拒绝的后缀，检查保留位置的输出。该测试覆盖静态掩码和前缀隔离。原生 KV 跨轮提交与回滚仍待验收。
+每层需要 CPU 对独立参考的相对 L2 ≤0.25%，HTP 对同输入 CPU 的相对 L2 ≤0.5%，最大误差分别 ≤参考峰值的 1% 和 2%。整批次还需要八个 top-1 全部匹配。若一层出现异常，后续层用下一份原生激活继续诊断，同时记录完整链已中断。整链失败时自动补跑实机已通过的第 0 层完整图和 post-RoPE 对照；必要时继续子图定位。
 
-结束后拍回整段 **VOXT SNAPDRAGON REPORT**。整图需要 CPU 对独立参考的相对 L2 ≤0.25%，HTP 对通过的 CPU 与独立参考均 ≤0.5%，最大误差分别 ≤参考峰值的 1% 和 2%。仅运行小图 CPU 数值对照，attention 内部使用 FP32。HTP 禁用 CPU fallback。CPU 对照失败时仍尝试 HTP 并保存能取得的执行证据。报告同时给出 QAIRT 执行事件和 30 次热态往返耗时。完整文件在 `Logs` 指向的目录内。
+结束后拍回整段 **VOXT SNAPDRAGON REPORT**。各层中位数之和由每层三次热态运行得出。端到端时间、原生 KV 跨轮提交和连续转录属于下一阶段。每层数据和完整结果留在 `Logs` 指向的 `target-replay` 目录。
 
 ## Hexagon HTP 依赖
 

@@ -4,12 +4,14 @@ param(
     [string]$ReportPath = (Join-Path ([IO.Path]::GetTempPath()) ('voxt-opencl-startup-' + (Get-Date -Format 'yyyyMMdd-HHmmss-fff') + '.txt')),
     [string]$NativeBuildDirectory,
     [string]$CaptureDirectory,
+    [switch]$CaptureAllLayers,
     [switch]$Transcribe,
     [switch]$Draft
 )
 
 $ErrorActionPreference = 'Stop'
 $ReportPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ReportPath)
+if ($CaptureAllLayers -and !$CaptureDirectory) { throw '-CaptureAllLayers requires -CaptureDirectory.' }
 if ($CaptureDirectory) {
     if (!$Draft -or !$Transcribe) { throw 'Capture requires -Draft and -Transcribe.' }
     $CaptureDirectory = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($CaptureDirectory)
@@ -55,6 +57,9 @@ function Invoke-ClipProbe([int]$Port, [string]$Audio) {
                     throw 'Capture tokens did not match the first full DFlash verification round.'
                 }
                 "Capture: PASS | layer $($capture.layer) | positions $($capture.positions[0])-$($capture.positions[7])"
+                if ($CaptureAllLayers) {
+                    "Capture layers: $($capture.layer_count) | logit columns: $($capture.logit_columns)"
+                }
             }
             'Transcription probe: PASS'
         } finally { $response.Dispose() }
@@ -109,6 +114,7 @@ function Invoke-ClipProbe([int]$Port, [string]$Audio) {
             $start.EnvironmentVariables['OMNI_DFLASH_PROFILE'] = '1'
         }
         if ($CaptureDirectory) { $start.EnvironmentVariables['VOXT_VERIFY_CAPTURE_DIR'] = $CaptureDirectory }
+        if ($CaptureAllLayers) { $start.EnvironmentVariables['VOXT_VERIFY_CAPTURE_ALL_LAYERS'] = '1' }
         $child = [Diagnostics.Process]::Start($start)
         "Started PID: $($child.Id)"
         $stderr = $child.StandardError.ReadToEndAsync()

@@ -8,7 +8,7 @@ import gguf
 import numpy as np
 from onnx import TensorProto, helper, numpy_helper
 
-from compare_capture import compare, load_weights
+from compare_capture import compare
 from prepare_attention import attention_reference, load_attention
 from prepare_ffn import FfnGraph, add_swiglu, sigmoid
 from projection import save_onnx_graph
@@ -46,8 +46,8 @@ def arrange_cache(capture, manifest, k, v, mask):
     }, int(allowed[0].sum() - 1)
 
 
-def read_weight(tensors, name, shape, *, quantized=False):
-    tensor = tensors[f"blk.0.{name}.weight"]
+def read_weight(tensors, layer, name, shape, *, quantized=False):
+    tensor = tensors[f"blk.{layer}.{name}.weight"]
     expected = gguf.GGMLQuantizationType.Q8_0 if quantized else gguf.GGMLQuantizationType.F32
     if tensor.tensor_type != expected or tuple(tensor.shape) != shape:
         raise ValueError(f"unexpected type or shape for {tensor.name}")
@@ -127,9 +127,9 @@ def project_qkv(graph, x, weights, norms, epsilon, tables):
     return result
 
 
-def build_graph(feeds, weights, norm, epsilon, scale, *, front=None, fp32_attention=False):
+def build_graph(feeds, weights, norm, epsilon, scale, *, front=None, fp32_attention=False, activation_code_limit=32000):
     output_weight, ffn_weights = weights
-    graph = FfnGraph()
+    graph = FfnGraph(activation_code_limit)
     if front:
         qkv = project_qkv(graph, feeds["residual"], *front)
     else:
@@ -175,10 +175,10 @@ def build_graph(feeds, weights, norm, epsilon, scale, *, front=None, fp32_attent
     outs = [helper.make_tensor_value_info("y_u16", TensorProto.UINT16, expected.shape)]
     model = helper.make_graph(graph.nodes, "verify_layer0_full" if front else "verify_layer0_post_rope", ins, outs,
                               [numpy_helper.from_array(value, name) for name, value in graph.initializers.items()])
-    return model, expected, dequantized
+    return model, expected, dequantized, float(graph.initializers["y_scale"])
 
 
-def prepare(capture, target, output, *, full=False):
+def prepare(capture, target, output, *, full=False, layer=0, activation_code_limit=32000, verbose=True):
     q, k, v, mask, native_attention, scale, counts = load_attention(capture)
     residual = np.fromfile(capture / "attention_residual.f32", dtype="<f4").reshape(8, 2048)
     native = np.fromfile(capture / "layer_out.f32", dtype="<f4").reshape(8, 2048)
@@ -186,19 +186,20 @@ def prepare(capture, target, output, *, full=False):
     cache, history = arrange_cache(capture, manifest, k, v, mask)
     feeds = {name: np.ascontiguousarray(value, dtype=np.float16)
              for name, value in {"Q": q, "residual": residual, **cache}.items()}
-    reader = gguf.GGUFReader(target)
+    reader = target if isinstance(target, gguf.GGUFReader) else gguf.GGUFReader(target)
     tensors = {t.name: t for t in reader.tensors}
-    output_weight = read_weight(tensors, "attn_output", (2048, 2048), quantized=True)
-    norm = read_weight(tensors, "ffn_norm", (2048,))
+    output_weight = read_weight(tensors, layer, "attn_output", (2048, 2048), quantized=True)
+    norm = read_weight(tensors, layer, "ffn_norm", (2048,))
     epsilon = float(reader.get_field("qwen3vl.attention.layer_norm_rms_epsilon").contents())
-    ffn_weights = tuple(load_weights(target, ["up", "gate", "down"]))
+    ffn_weights = tuple(read_weight(tensors, layer, f"ffn_{name}", shape, quantized=True)
+                        for name, shape in (("up", (2048, 6144)), ("gate", (2048, 6144)), ("down", (6144, 2048))))
 
     front = None
     front_errors = {}
     if full:
-        qkv_weights = tuple(read_weight(tensors, f"attn_{name}", (2048, width), quantized=True)
+        qkv_weights = tuple(read_weight(tensors, layer, f"attn_{name}", (2048, width), quantized=True)
                             for name, width in (("q", 2048), ("k", 1024), ("v", 1024)))
-        qkv_norms = tuple(read_weight(tensors, name, (width,))
+        qkv_norms = tuple(read_weight(tensors, layer, name, (width,))
                           for name, width in (("attn_norm", 2048), ("attn_q_norm", 128), ("attn_k_norm", 128)))
         front = qkv_weights, qkv_norms, epsilon, rotary_tables(capture, manifest)
         rebuilt = project_qkv(None, residual, *front)
@@ -217,8 +218,10 @@ def prepare(capture, target, output, *, full=False):
     dense = dense_residual + (gate * sigmoid(gate) * (normed @ w_up.T)) @ w_down.T
 
     weights = (output_weight, ffn_weights)
-    model, expected, dequantized = build_graph(feeds, weights, norm, epsilon, scale, front=front)
-    cpu_model, _, _ = build_graph(feeds, weights, norm, epsilon, scale, front=front, fp32_attention=True)
+    model, expected, dequantized, output_scale = build_graph(
+        feeds, weights, norm, epsilon, scale, front=front, activation_code_limit=activation_code_limit)
+    cpu_model, _, _, _ = build_graph(
+        feeds, weights, norm, epsilon, scale, front=front, activation_code_limit=activation_code_limit, fp32_attention=True)
     output.mkdir(parents=True, exist_ok=False)
     save_onnx_graph(model, output / "verify_projection.onnx", opset=23)
     save_onnx_graph(cpu_model, output / "attention_cpu_fp32.onnx", opset=23)
@@ -231,12 +234,15 @@ def prepare(capture, target, output, *, full=False):
         "history_tokens": history, "staged_tokens": 8, "cache_columns": int(k.shape[2]),
         "visible_keys_per_query": counts,
         "dense_qkv_vs_native": front_errors,
+        "output_scale": output_scale,
     }
     text = json.dumps(report, indent=2) + "\n"
     (output / "preparation.json").write_text(text, encoding="utf-8")
-    print(text, end="")
+    if verbose:
+        print(text, end="")
     if report["dense_vs_native_capture"]["relative_l2_error"] > 0.03:
         raise ValueError("dense reconstruction differs from native layer output by more than 3% L2")
+    return feeds, expected, report
 
 
 def main():

@@ -9,27 +9,24 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
 class voxt_verify_attention_capture {
 public:
-    bool wants(const ggml_tensor * node) const {
+    bool wants(const ggml_tensor * node, std::string_view name) const {
         if (!output.bytes.empty()) {
             return false;
         }
-        const char * name = ggml_get_name(node);
         const auto * query = node->src[0];
         return (node->op == GGML_OP_FLASH_ATTN_EXT && query && query->ne[0] == 128 &&
                 query->ne[1] == 8 && query->ne[2] == 16 && query->ne[3] == 1) ||
-               std::strcmp(name, "kq-0") == 0 || std::strcmp(name, "kq_soft_max-0") == 0 ||
-               std::strcmp(name, "kqv-0") == 0 || std::strcmp(name, "Qcur-0") == 0 ||
-               std::strcmp(name, "Kcur-0") == 0 ||
-               std::strcmp(name, "Vcur-0") == 0;
+               name == "kq" || name == "kq_soft_max" || name == "kqv" ||
+               name == "Qcur" || name == "Kcur" || name == "Vcur";
     }
 
-    void read(const ggml_tensor * node) {
-        const char * name = ggml_get_name(node);
+    void read(const ggml_tensor * node, std::string_view name) {
         if (node->op == GGML_OP_FLASH_ATTN_EXT) {
             flash = true;
             q.read(node->src[0]);
@@ -39,16 +36,16 @@ public:
             rows.read(node->src[5]);
             output.read(node);
             std::memcpy(&scale, node->op_params, sizeof(scale));
-        } else if (std::strcmp(name, "kq-0") == 0) {
+        } else if (name == "kq") {
             k.read(node->src[0]);
             q.read(node->src[1]);
-        } else if (std::strcmp(name, "kq_soft_max-0") == 0) {
+        } else if (name == "kq_soft_max") {
             mask.read(node->src[1]);
             std::memcpy(&scale, node->op_params, sizeof(scale));
-        } else if (std::strcmp(name, "kqv-0") == 0) {
+        } else if (name == "kqv") {
             v.read(node->src[0]);
             output.read(node);
-        } else if (std::strcmp(name, "Qcur-0") == 0 && node->op == GGML_OP_ROPE && node->src[2] == nullptr) {
+        } else if (name == "Qcur" && node->op == GGML_OP_ROPE && node->src[2] == nullptr) {
             rope_positions.read(node->src[1]);
             // Parameter layout at the pinned ggml revision. Capture effective runtime settings.
             std::array<float, 4> scaling{};
@@ -58,16 +55,16 @@ public:
                                {"base", scaling[0]}, {"freq_scale", scaling[1]},
                                {"ext_factor", scaling[2]}, {"attn_factor", scaling[3]},
                                {"sections", sections}, {"offset", node->op_params[15]}};
-        } else if (std::strcmp(name, "Kcur-0") == 0) {
+        } else if (name == "Kcur") {
             current_k.read(node);
-        } else if (std::strcmp(name, "Vcur-0") == 0) {
+        } else if (name == "Vcur") {
             current_v.read(node);
         }
     }
 
-    void save(const std::filesystem::path & directory) const {
+    bool save(const std::filesystem::path & directory) const {
         if (q.bytes.empty() || k.bytes.empty() || v.bytes.empty() || mask.bytes.empty() || output.bytes.empty()) {
-            return;
+            return false;
         }
         common_json manifest = {{"flash", flash}, {"scale", scale}};
         if (!rope_positions.bytes.empty()) {
@@ -85,6 +82,7 @@ public:
         file.exceptions(std::ios::failbit | std::ios::badbit);
         file << manifest.dump(2) << '\n';
         file.close();
+        return true;
     }
 
 private:

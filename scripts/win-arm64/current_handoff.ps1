@@ -8,7 +8,7 @@ param(
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 $summary = [System.Collections.Generic.List[string]]::new()
-$summary.Add('Test: layer-0 full and post-RoPE HTP replay | eight positions | KV visibility')
+$summary.Add('Test: 28-layer Target HTP replay | eight positions | DFlash aux and logits')
 $source = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '../..')).Path
 
 function Invoke-QnnStep([string]$Exe, [string[]]$Arguments, [string]$Name, [int]$TimeoutSeconds, [switch]$Probe) {
@@ -161,9 +161,9 @@ sys.exit(0 if platform == 'win-arm64' and sys.implementation.name == 'cpython' a
     $capture = Join-Path $LogDirectory 'verify-capture'
     $captureLog = Join-Path $LogDirectory 'adreno-capture.txt'
     & (Join-Path $PSScriptRoot 'probe_opencl_startup.ps1') -InstallDirectory $InstallDirectory `
-        -NativeBuildDirectory $BuildDirectory -Transcribe -Draft -CaptureDirectory $capture -ReportPath $captureLog | Out-Host
+        -NativeBuildDirectory $BuildDirectory -Transcribe -Draft -CaptureDirectory $capture -CaptureAllLayers -ReportPath $captureLog | Out-Host
     $captureDetails = Get-Content -Encoding UTF8 -LiteralPath $captureLog
-    foreach ($line in ($captureDetails -match '^(Capture:|Transcription probe:|Exit code:|Startup probe error:)')) {
+    foreach ($line in ($captureDetails -match '^(Capture:|Capture layers:|Transcription probe:|Exit code:|Startup probe error:)')) {
         $summary.Add($line)
     }
     if (!($captureDetails -match '^Capture: PASS') -or !($captureDetails -match '^Transcription probe: PASS$') -or
@@ -171,10 +171,46 @@ sys.exit(0 if platform == 'win-arm64' and sys.implementation.name == 'cpython' a
         throw "Adreno DFlash capture did not complete. See $captureLog"
     }
 
-    $stage = 'Layer-0 replays'
+    $stage = 'Target replay'
     $toolsDir = Join-Path $source 'tools/qnn-probe'
     $target = Join-Path $InstallDirectory 'models/target.gguf'
-    $failures = @()
+    $draft = Join-Path $InstallDirectory 'models/draft-4.gguf'
+    $targetDir = Join-Path $LogDirectory 'target-replay'
+    $targetStep = Invoke-QnnStep $python @('-X', 'utf8', (Join-Path $toolsDir 'replay_target.py'),
+        '--capture', $capture, '--target', $target, '--draft', $draft, '--output', $targetDir) 'target-replay' 1200 -Probe
+    $targetReport = Join-Path $targetDir 'target_replay.json'
+    if (Test-Path -LiteralPath $targetReport -PathType Leaf) {
+        $replay = Get-Content -Raw -LiteralPath $targetReport | ConvertFrom-Json
+        $chain = if ($replay.chain_complete) { 'complete' } else { 'interrupted' }
+        $summary.Add("Decoder chain: $chain | HTP $($replay.htp_layers_passed)/$($replay.layer_count) | CPU $($replay.cpu_layers_passed)/$($replay.layer_count)")
+        $summary.Add(('QAIRT executes: {0} | HTP layer medians summed: {1:F2} ms' -f
+            $replay.htp_events, $replay.htp_layer_ms_sum))
+        if ($replay.chain_complete) {
+            $logits = $replay.logits
+            $summary.Add("Logits top-1 vs Adreno | native-hidden $($logits.native_hidden.matches)/8 | CPU $($logits.cpu_chain.matches)/8 | HTP $($logits.htp_chain.matches)/8")
+            $summary.Add(('HTP logits relative L2: {0:P3} | IDs: {1}' -f
+                $logits.htp_chain.relative_l2_error, ($logits.htp_chain.top1 -join ',')))
+            if ($logits.htp_chain.matches -ne 8) { $summary.Add("Adreno IDs: $($replay.native_top1 -join ',')") }
+            $aux = foreach ($entry in $replay.aux.PSObject.Properties) {
+                '{0}={1:P3}' -f $entry.Name, $entry.Value.htp_chain_vs_native.relative_l2_error
+            }
+            $summary.Add("DFlash auxiliary input relative L2: $($aux -join ' | ')")
+        }
+        if ($replay.failed_layers.Count) { $summary.Add("Failed layers (zero-indexed): $($replay.failed_layers -join ',')") }
+        foreach ($entry in ($replay.errors.PSObject.Properties | Select-Object -First 2)) {
+            $summary.Add("Layer $($entry.Name) error: $(($entry.Value -split '\r?\n')[0])")
+        }
+        if ($replay.passed -and $replay.backend -eq 'htp' -and $targetStep.Passed) {
+            $summary.Add('Target replay: PASS')
+            return
+        }
+    } else {
+        foreach ($line in ($targetStep.Errors -split '\r?\n' | Where-Object { $_.Trim() } | Select-Object -Last 3)) {
+            $summary.Add($line.Trim())
+        }
+    }
+    $summary.Add("Target replay: FAIL ($($targetStep.Status)) | running layer-0 diagnostics")
+    $failures = @('target-replay')
     $postRopePassed = $false
     foreach ($case in @(
         @{Name = 'full-decoder'; Prepare = 'prepare_decoder_layer.py'; More = @('--target', $target, '--full'); Output = 'actual_u16.npy'}

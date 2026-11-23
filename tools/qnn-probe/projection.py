@@ -149,6 +149,31 @@ def check_cache_visibility(session, run_options, inputs, baseline):
     return results
 
 
+def htp_session_options(qnn, profile_prefix, *, dump_directory=None, lut_off=False):
+    devices = [device for device in ort.get_ep_devices() if device.ep_name == QNN_PROVIDER]
+    if not devices:
+        raise RuntimeError("QNN execution provider did not expose a device")
+    options = ort.SessionOptions()
+    options.add_session_config_entry("session.disable_cpu_ep_fallback", "1")
+    provider_options = {"backend_path": qnn.get_qnn_htp_path()}
+    if dump_directory is not None:
+        provider_options.update(dump_json_qnn_graph="1", json_qnn_graph_dir=str(dump_directory))
+    if lut_off:
+        provider_options["enable_htp_matmul_lut"] = "0"
+    options.add_provider_for_devices(devices, provider_options)
+    options.enable_profiling = True
+    options.profile_file_prefix = str(profile_prefix)
+    run_options = ort.RunOptions()
+    run_options.add_run_config_entry("qnn.perf_mode", "burst")
+    return options, run_options, devices
+
+
+def htp_execute_events(path):
+    profile = json.loads(Path(path).read_text(encoding="utf-8"))
+    return sum(event.get("qnn_operation") == "execute" and event.get("qnn_timing_source") == "BACKEND"
+               for event in (entry.get("args") or {} for entry in profile))
+
+
 def benchmark(args):
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
@@ -179,8 +204,6 @@ def benchmark(args):
         if not (attention or layer) or args.backend != "cpu":
             raise ValueError("--attention-cpu-fp32 requires a CPU attention replay")
         model = args.replay / "attention_cpu_fp32.onnx"
-    options = ort.SessionOptions()
-    run_options = ort.RunOptions()
     qnn_version = None
     if args.backend == "htp":
         import onnxruntime_qnn as qnn
@@ -188,24 +211,13 @@ def benchmark(args):
         qnn_version = qnn.__version__
         ort.register_execution_provider_library(QNN_PROVIDER, qnn.get_library_path())
 
-    session = devices = None
+    session = options = devices = None
     try:
         if args.backend == "htp":
-            devices = [device for device in ort.get_ep_devices() if device.ep_name == QNN_PROVIDER]
-            if not devices:
-                raise RuntimeError("QNN execution provider did not expose a device")
-            options.add_session_config_entry("session.disable_cpu_ep_fallback", "1")
-            provider_options = {
-                "backend_path": qnn.get_qnn_htp_path(),
-                "dump_json_qnn_graph": "1",
-                "json_qnn_graph_dir": str(output),
-            }
-            if args.variant == "lut-off":
-                provider_options["enable_htp_matmul_lut"] = "0"
-            options.add_provider_for_devices(devices, provider_options)
-            options.enable_profiling = True
-            options.profile_file_prefix = str(output / "ort_profile")
-            run_options.add_run_config_entry("qnn.perf_mode", "burst")
+            options, run_options, devices = htp_session_options(
+                qnn, output / "ort_profile", dump_directory=output, lut_off=args.variant == "lut-off")
+        else:
+            options, run_options = ort.SessionOptions(), ort.RunOptions()
 
         start = time.perf_counter()
         providers = ["CPUExecutionProvider"] if args.backend == "cpu" else None
@@ -242,11 +254,7 @@ def benchmark(args):
         htp_events = None
         if args.backend == "htp":
             profile_path = Path(session.end_profiling())
-            profile = json.loads(profile_path.read_text(encoding="utf-8"))
-            htp_events = sum(
-                event.get("qnn_operation") == "execute" and event.get("qnn_timing_source") == "BACKEND"
-                for event in (entry.get("args") or {} for entry in profile)
-            )
+            htp_events = htp_execute_events(profile_path)
         result = {
             "backend": args.backend,
             "variant": args.variant,

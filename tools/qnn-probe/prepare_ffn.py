@@ -12,15 +12,16 @@ from projection import save_onnx_graph
 
 
 class FfnGraph:
-    def __init__(self):
+    def __init__(self, activation_code_limit=32000):
         self.nodes = []
         self.initializers = {}
+        self.activation_code_limit = activation_code_limit
 
     def node(self, op, inputs, output, **attributes):
         self.nodes.append(helper.make_node(op, inputs, [output], name=output, **attributes))
 
     def activation(self, name, values, *, input_tensor=False, output_tensor=False, sigmoid=False):
-        scale = np.array(1 / 65536 if sigmoid else np.max(np.abs(values)) / 32000, dtype=np.float32)
+        scale = np.array(1 / 65536 if sigmoid else np.max(np.abs(values)) / self.activation_code_limit, dtype=np.float32)
         zero = 0 if sigmoid else 32768
         if not np.isfinite(scale) or scale <= 0:
             raise ValueError(f"invalid activation scale for {name}")

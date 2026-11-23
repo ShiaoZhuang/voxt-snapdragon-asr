@@ -1,7 +1,7 @@
 # Voxt 骁龙 Windows ARM64 本地 ASR
 status: in-progress
 
-current_handoff: [HANDOFF-20261123-084939-voxt-snapdragon-asr.md](HANDOFF-20261123-084939-voxt-snapdragon-asr.md)
+current_handoff: [HANDOFF-20261123-090906-voxt-snapdragon-asr.md](HANDOFF-20261123-090906-voxt-snapdragon-asr.md)
 
 ## 目标与边界
 保留 Voxt 交互和协议，从干净上游构建 Qwen3-ASR 1.7B + DFlash。旧骁龙原型只提供性能现象参考。
@@ -32,10 +32,12 @@ current_handoff: [HANDOFF-20261123-084939-voxt-snapdragon-asr.md](HANDOFF-202611
 - [x] 将 KV 追加、post-RoPE attention、残差、归一化和完整 FFN 编入同一图并完成 Mac 数值对照。
 - [x] 骁龙实测第 0 层 post-RoPE 整图的 HTP 精度、执行与耗时。
 - [x] 合并完整第 0 层、post-RoPE 对照与四项 KV 可见性检查，验证固定入口和自动故障诊断。
-- [ ] 一次实机交接验收两张图和 KV 可见性。
+- [x] 一次实机交接验收两张图和 KV 可见性。
+- [x] 捕获完整 Target 的真实校验状态，完成 28 层串联 CPU 对照和词表输出验证。
+- [ ] 验收骁龙 28 层 HTP 串联回放、DFlash 辅助张量与最终 logits。
 - [ ] 完成 Hexagon Target 验证前向的实机可行性与性能报告。
 - [ ] 验收 Windows 桌面听写与实时接口。
 ## Current State
-post-RoPE 整图实机通过，多步验证已就绪。
+第 0 层 HTP 实机验收通过，28 层串联回放已就绪。
 ## 依赖与下一步
-骁龙结果依赖离线实机交接。下一步：骁龙本用固定入口运行一次，回传 VOXT SNAPDRAGON REPORT，验收完整第 0 层 HTP、post-RoPE 对照及 KV 可见性。
+骁龙结果依赖离线实机交接。下一步：骁龙本运行一次固定入口，回传 28 层、QAIRT、DFlash 辅助输入和八位置 top-1 的终端摘要。
