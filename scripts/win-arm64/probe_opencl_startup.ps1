@@ -3,7 +3,8 @@ param(
     [string]$InstallDirectory = (Join-Path $PSScriptRoot '../../dist/voxt-snapdragon-veri-1'),
     [string]$ReportPath = (Join-Path ([IO.Path]::GetTempPath()) ('voxt-opencl-startup-' + (Get-Date -Format 'yyyyMMdd-HHmmss-fff') + '.txt')),
     [string]$NativeBuildDirectory,
-    [switch]$Transcribe
+    [switch]$Transcribe,
+    [switch]$Draft
 )
 
 $ErrorActionPreference = 'Stop'
@@ -48,7 +49,8 @@ function Invoke-ClipProbe([int]$Port, [string]$Audio) {
 }
 
 & {
-    '=== Voxt OpenCL Target startup ==='
+    if ($Draft) { '=== Voxt OpenCL Q4 DFlash startup ===' }
+    else { '=== Voxt OpenCL Target startup ===' }
     'Time: ' + (Get-Date -Format o)
     "Windows: $([Environment]::OSVersion.VersionString) | PowerShell: $($PSVersionTable.PSVersion)"
 
@@ -73,9 +75,11 @@ function Invoke-ClipProbe([int]$Port, [string]$Audio) {
         }
         $audio = Join-Path $root 'eval/zh-plain-1.wav'
         if ($Transcribe -and !(Test-Path -LiteralPath $audio -PathType Leaf)) { throw "Missing $audio" }
+        if ($Draft -and !(Test-Path -LiteralPath (Join-Path $models 'draft-4.gguf') -PathType Leaf)) { throw 'Missing Q4 Draft model.' }
 
         $start = [Diagnostics.ProcessStartInfo]::new($server)
         $start.Arguments = '--supervised --host 127.0.0.1 --port 0 --backend opencl --model-directory "' + $models + '"'
+        if ($Draft) { $start.Arguments += ' --draft-model-path "' + $models + '" --draft-bits 4' }
         $start.WorkingDirectory = $root
         $start.UseShellExecute = $false
         $start.RedirectStandardInput = $true
@@ -84,6 +88,10 @@ function Invoke-ClipProbe([int]$Port, [string]$Audio) {
         $start.StandardOutputEncoding = [Text.Encoding]::UTF8
         $start.StandardErrorEncoding = [Text.Encoding]::UTF8
         $start.EnvironmentVariables['LLAMA_ARG_LOG_VERBOSITY'] = '5'
+        if ($Transcribe) {
+            $start.EnvironmentVariables['VOXT_ASR_TRACE'] = '1'
+            $start.EnvironmentVariables['OMNI_DFLASH_PROFILE'] = '1'
+        }
         $child = [Diagnostics.Process]::Start($start)
         "Started PID: $($child.Id)"
         $stderr = $child.StandardError.ReadToEndAsync()
