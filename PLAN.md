@@ -27,9 +27,26 @@ MacBook 负责开发、模型转换、数值对照和优先产包。骁龙笔记
 
 首轮质量门槛通过后，加跑 Q4_0 Target 的 CPU/GPU 对照；记录实际权重、激活和 KV 精度。保留 Q8_0 结果作为跨设备比较基准。GPU 忙碌率与按阶段耗时并列展示；用同机对照检验重复 prefill、跨设备拷贝、过度同步以及每轮 KV 重建是否拖慢了验证。
 
+### Windows ARM64 实测基线
+
+2026-11-23 骁龙 X Elite，`cd064eb`，同设备纯 Target 和 Q4 DFlash 均为 31 条逐 token 一致。每组词典命中 7/10。下表的秒数是 31 条主样本请求耗时之和。
+
+| 后端 | Target-only | Q4 DFlash | 综合错误率 | DFlash avg_accept / avg_step / 接收率 | Target 验证 |
+|---|---:|---:|---:|---|---|
+| Oryon CPU | 303.8 s | 492.4 s | 2.85% | 3.29 / 4.29 / 47.0% | 556.90 ms/轮 (48.4%) |
+| Adreno OpenCL | 123.8 s | 116.5 s | 3.07% | 3.32 / 4.32 / 47.5% | 210.11 ms/轮 (84.6%) |
+
+两组 DFlash 的干净样本 avg_accept 都为 6.00，zh-plain/en 错误率均为 0%。long 为 CPU 2.24%、OpenCL 2.65%。OpenCL Target 验证计时覆盖解码和同步。做混合实验时，应计入新路径的计算、传输和同步，再与现有 210.11 ms/轮对照。
+
 ## 3. 必做的 Hexagon Target 验证实验
 
 首轮 GPU 验收完成即可启动该实验，与 Windows 桌面移植独立推进。首个 NPU 交付物是 **Target 固定八位置验证前向** 的实机报告。Audio Encoder 上 NPU 作为后续独立实验，可按首轮 profiling 排序。[QNN Execution Provider](https://onnxruntime.ai/docs/execution-providers/QNN-ExecutionProvider.html)
+
+先在获准的 Windows ARM64 Python 环境运行 `tools/qnn-probe/projection.py`。探针生成 `[8,2048] × [2048,6144]` 的静态 QDQ 投影，激活 U16、权重 U8，使用合成输入和权重。要求禁止 CPU fallback、输出通过独立整数参考校验、ORT profiling 含 QAIRT backend execute 事件。它验证 HTP 运行时和一个真实尺寸的投影，整块 Target、真实量化权重、KV 更新和转录质量仍由下述回放验证。[QNN EP v2.8.0 插件与 profiling](https://github.com/onnxruntime/onnxruntime-qnn/blob/v2.8.0/docs/execution_providers/QNN-ExecutionProvider.md)
+
+当前 Target 是 28 层、8 个 KV 头、K/V 头维均为 128，默认 FP16 KV 每个位置 112 KiB。完整 KV 在 2,048/8,192 位置分别约 224/896 MiB，每轮的八位置增量约 896 KiB。三层 FP16 aux 的八位置有效数据为 96 KiB。若回读全部八行 FP32 logits，还需约 4.64 MiB。上述为逻辑张量大小，实际拷贝量要按布局、分配与同步实测。连续解码应让 Target KV 常驻同一设备，首次做 prefill 和 KV 交接后只提交被接受的位置；单独计量跨设备 aux、logits 及必要的 KV 增量。
+
+优先通过 QNN EP 的 HTP 后端建立设备对照。并行评估 llama.cpp 的 Hexagon 路径能否复用现有 GGUF 图和取样逻辑。Windows 上该路径依赖受信任签名的 HTP 算子库，实机可用性按公司设备的软件审批状态验证。[llama.cpp Windows Hexagon 指南](https://github.com/ggml-org/llama.cpp/blob/e412c6f468b7b9e0f16f2540244236f8ad68e9ae/docs/backend/snapdragon/windows.md)
 
 1. **先回放同一批真实状态。** 从公开样本捕获短、中、长上下文中的 anchor、候选、位置、掩码和 Target KV。在同一台骁龙上用 GPU 或 CPU 参考路径与 QNN/QAIRT HTP 路径回放，比较各位置的 logits、argmax、三层 aux 输入和 KV 更新。为静态图规定上下文容量档位、有效长度和尾块掩码；对首次拒绝、EOS、非满八位的情况验证 KV 提交边界。
 2. **再接连续解码。** 先固定 Draft 与 prefill 的设备，替换 Target 验证这一项。明确 KV 由哪一侧持有，单列首次 prefill KV 转移、每轮 KV 增量、候选、aux 与输出的搬运字节和同步时间。验证设备跟踪能证明 Target 图确实在 HTP 上执行。涉及精度变化时，额外跑对应精度的参考对照。
