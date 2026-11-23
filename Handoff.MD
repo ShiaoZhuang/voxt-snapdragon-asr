@@ -19,16 +19,11 @@ git switch --detach veri-1-auto-handoff
 
 结束后拍屏幕上的 **VOXT SNAPDRAGON REPORT** 整段，包含提交、通过状态、关键错误和日志位置。完整输出、探针报告和文本摘要保存在 `Logs:` 指向的目录。
 
-## Hexagon HTP 一次性准备
+## Hexagon HTP 依赖
 
-已有包含 ONNX Runtime QNN 的获准 ARM64 Python 环境时，可直接跑固定脚本。如需准备，在仓库根目录用获准的 Windows ARM64 Python 3.11–3.14 创建此项目的虚拟环境。通过公司允许的 Python 软件源获取下列已固定版本的包。[QNN EP v2.8.0 安装说明](https://github.com/onnxruntime/onnxruntime-qnn/tree/v2.8.0#install)
+固定脚本使用已安装的 Windows ARM64 Python 3.11–3.14，首次运行自动创建 `.local/qnn-probe-venv`，从本机配置的 pip 软件源安装 `tools/qnn-probe/requirements-win-arm64.txt` 中锁定的包。后续会复用该环境。依赖安装失败时，摘要会标出这个阶段，原始输出在 `qnn-dependencies.stdout.log` 和 `qnn-dependencies.stderr.log`。[QNN EP v2.8.0 安装说明](https://github.com/onnxruntime/onnxruntime-qnn/tree/v2.8.0#install)
 
-```powershell
-python -m venv .\.local\qnn-probe-venv
-.\.local\qnn-probe-venv\Scripts\python.exe -m pip install --only-binary=:all: onnx==1.22.0 onnxruntime==1.29.0 onnxruntime-qnn==2.8.0
-```
-
-跑固定入口时，脚本优先使用该环境。探针包含一个独立的整数参考校验，目标是确认 QNN 在 HTP 上实际执行一种与 ASR Target 同尺寸的投影，为真实权重和 KV 回放建立运行时基线。
+探针包含一个独立的整数参考校验，目标是确认 QNN 在 HTP 上实际执行一种与 ASR Target 同尺寸的投影，为真实权重和 KV 回放建立运行时基线。
 
 ## 骁龙本从源码构建与验收
 
