@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param([switch]$Quick, [string]$OutputDirectory, [string]$InstallDirectory, [switch]$OpenCLFix, [string]$NativeBuildDirectory)
+param([switch]$Quick, [string]$OutputDirectory, [string]$InstallDirectory, [switch]$OpenCLFix, [string]$NativeBuildDirectory, [switch]$OpenCLOnly)
 
 $ErrorActionPreference = 'Stop'
 $scriptRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '../..')).Path
@@ -22,10 +22,12 @@ $nativeBuild = $null
 $passed = $true
 $previousBackend = $env:VOXT_ASR_BACKEND
 $previousTrace = $env:VOXT_ASR_TRACE
+$backends = if ($OpenCLOnly) { @('opencl') } else { @('cpu', 'opencl') }
 $report.Add('# Voxt Snapdragon verification')
 $report.Add('')
 $report.Add('Date: ' + (Get-Date -Format o))
 $report.Add('Mode: ' + $(if ($Quick) { 'smoke' } else { '31 clips' }))
+$report.Add('Backends: ' + ($backends -join ', '))
 $report.Add('Windows: ' + [Environment]::OSVersion.VersionString)
 
 function Invoke-Captured($Exe, [string[]]$Arguments, $Prefix, [int]$TimeoutSeconds) {
@@ -150,7 +152,7 @@ try {
     }
 
     $env:VOXT_ASR_TRACE = '1'
-    foreach ($backend in @('cpu', 'opencl')) {
+    foreach ($backend in $backends) {
         $env:VOXT_ASR_BACKEND = $backend
         foreach ($mode in @('target-only', 'draft-q4')) {
             $name = "$backend-$mode"

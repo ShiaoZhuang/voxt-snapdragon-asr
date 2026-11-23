@@ -8,7 +8,7 @@ param(
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 $summary = [System.Collections.Generic.List[string]]::new()
-$summary.Add('Test: Voxt 31 clips | Oryon CPU + Adreno OpenCL | Target-only + Q4 DFlash')
+$summary.Add('Test: Voxt 31 clips | Adreno OpenCL | Target-only + Q4 DFlash')
 $stage = 'local assets'
 try {
     if (!(Test-Path -LiteralPath (Join-Path $InstallDirectory 'verify_manifest.json') -PathType Leaf)) {
@@ -21,7 +21,7 @@ try {
 
     $stage = 'Voxt benchmark'
     $results = Join-Path $LogDirectory 'verification'
-    & (Join-Path $PSScriptRoot 'run_verify.ps1') -NativeBuildDirectory $BuildDirectory `
+    & (Join-Path $PSScriptRoot 'run_verify.ps1') -OpenCLOnly -NativeBuildDirectory $BuildDirectory `
         -InstallDirectory $InstallDirectory -OutputDirectory $results
     $stats = Get-Content -Raw -LiteralPath (Join-Path $results 'verify_stats.json') | ConvertFrom-Json
     $report = Join-Path $results 'verify_report.md'
@@ -29,7 +29,7 @@ try {
         $summary.Add($line.Trim())
     }
 
-    foreach ($name in @('cpu-target-only', 'cpu-draft-q4', 'opencl-target-only', 'opencl-draft-q4')) {
+    foreach ($name in @('opencl-target-only', 'opencl-draft-q4')) {
         $run = $stats.runs.$name
         if (!$run) { continue }
         if ($run.error) {
