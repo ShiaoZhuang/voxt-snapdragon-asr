@@ -38,11 +38,13 @@ MacBook 负责开发、模型转换、数值对照和优先产包。骁龙笔记
 
 两组 DFlash 的干净样本 avg_accept 都为 6.00，zh-plain/en 错误率均为 0%。long 为 CPU 2.24%、OpenCL 2.65%。OpenCL Target 验证计时覆盖解码和同步。做混合实验时，应计入新路径的计算、传输和同步，再与现有 210.11 ms/轮对照。
 
+同日 `76f75d8` 复验只运行两组 OpenCL。两组错误率均为 3.07%，词典命中 7/10，逐 token 差异为 0。纯 Target 和 Q4 DFlash 的主样本累计请求耗时分别为 110.5 和 108.2 秒。DFlash avg_accept 3.32，接收率 47.5%。Draft / Target / Context 为 29.16 / 195.85 / 6.48 ms/轮，占比分别为 12.6% / 84.6% / 2.8%。与首跑相比，耗时波动大于两种模式之间的差距。混合方案的速度结论应使用同机配对复测。
+
 ## 3. 必做的 Hexagon Target 验证实验
 
 首轮 GPU 验收完成即可启动该实验，与 Windows 桌面移植独立推进。首个 NPU 交付物是 **Target 固定八位置验证前向** 的实机报告。Audio Encoder 上 NPU 作为后续独立实验，可按首轮 profiling 排序。[QNN Execution Provider](https://onnxruntime.ai/docs/execution-providers/QNN-ExecutionProvider.html)
 
-先在获准的 Windows ARM64 Python 环境运行 `tools/qnn-probe/projection.py`。探针生成 `[8,2048] × [2048,6144]` 的静态 QDQ 投影，激活 U16、权重 U8，使用合成输入和权重。要求禁止 CPU fallback、输出通过独立整数参考校验、ORT profiling 含 QAIRT backend execute 事件。它验证 HTP 运行时和一个真实尺寸的投影，整块 Target、真实量化权重、KV 更新和转录质量仍由下述回放验证。[QNN EP v2.8.0 插件与 profiling](https://github.com/onnxruntime/onnxruntime-qnn/blob/v2.8.0/docs/execution_providers/QNN-ExecutionProvider.md)
+先用固定验收入口在获准的 Windows ARM64 Python 环境运行 `tools/qnn-probe/projection.py`。探针生成 `[8,2048] × [2048,6144]` 的静态 QDQ 投影，激活 U16、权重 U8，使用合成输入和权重。要求禁止 CPU fallback、输出通过独立整数参考校验、ORT profiling 含 QAIRT backend execute 事件。它验证 HTP 运行时和一个真实尺寸的投影，整块 Target、真实量化权重、KV 更新和转录质量仍由下述回放验证。[QNN EP v2.8.0 插件与 profiling](https://github.com/onnxruntime/onnxruntime-qnn/blob/v2.8.0/docs/execution_providers/QNN-ExecutionProvider.md)
 
 当前 Target 是 28 层、8 个 KV 头、K/V 头维均为 128，默认 FP16 KV 每个位置 112 KiB。完整 KV 在 2,048/8,192 位置分别约 224/896 MiB，每轮的八位置增量约 896 KiB。三层 FP16 aux 的八位置有效数据为 96 KiB。若回读全部八行 FP32 logits，还需约 4.64 MiB。上述为逻辑张量大小，实际拷贝量要按布局、分配与同步实测。连续解码应让 Target KV 常驻同一设备，首次做 prefill 和 KV 交接后只提交被接受的位置；单独计量跨设备 aux、logits 及必要的 KV 增量。
 
