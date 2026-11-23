@@ -105,6 +105,7 @@ try {
     if ($NativeBuildDirectory) {
         $localRoot = (Resolve-Path -LiteralPath $NativeBuildDirectory).Path
         $nativeBuild = Get-Content -Raw -LiteralPath (Join-Path $localRoot 'verify_native_manifest.json') | ConvertFrom-Json
+        if (!$nativeBuild.files.'final-benchmark.exe') { throw 'This native build contains the backend only. Run build_native.ps1 without -BackendOnly for the benchmark.' }
         $report.Add("Native Windows build: $($nativeBuild.commit)")
         $report.Add("Native llama.cpp source: $($nativeBuild.llama_cpp)")
         $report.Add("Native Voxt runner source: $($nativeBuild.voxt)")

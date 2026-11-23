@@ -2,7 +2,8 @@
 param(
     [string]$BuildDirectory = (Join-Path $PSScriptRoot '../../build/win-arm64-native'),
     [ValidateRange(1,64)][int]$Jobs = 6,
-    [switch]$ToolchainCheck
+    [switch]$ToolchainCheck,
+    [switch]$BackendOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -54,7 +55,8 @@ $pathDirs = @($env:PATH -split [IO.Path]::PathSeparator)
 $env:PATH = ($pathDirs + @($toolDirs | Where-Object { Test-Path -LiteralPath $_ -PathType Container }) | Select-Object -Unique) -join [IO.Path]::PathSeparator
 
 Write-Host "Visual Studio: $vsInstall | target: $($env:VSCMD_ARG_TGT_ARCH)"
-$toolNames = @('git', 'cmake', 'ninja', 'clang', 'clang++', 'python', 'go')
+$toolNames = @('git', 'cmake', 'ninja', 'clang', 'clang++', 'python')
+if (!$BackendOnly) { $toolNames += 'go' }
 $missing = @(foreach ($name in $toolNames) {
     $tool = Get-Command $name -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($tool) { Write-Host "  $name = $($tool.Source)" }
@@ -65,6 +67,9 @@ if ($env:VSCMD_ARG_TGT_ARCH -ne 'arm64') {
     $problems += 'Visual Studio ARM64 environment unavailable. Open your installed Developer PowerShell with the ARM64 target.'
 }
 if ($missing.Count) { $problems += "Tools still missing: $($missing -join ', '). Check approved installations or PATH." }
+if ($missing -contains 'clang' -or $missing -contains 'clang++') {
+    $problems += 'The pinned Windows ARM64 OpenCL backend requires Clang. Use the approved Visual Studio C++ Clang Compiler for Windows component or an approved LLVM installation.'
+}
 if ($problems.Count) { throw ($problems -join [Environment]::NewLine) }
 if ($ToolchainCheck) {
     Write-Output 'Toolchain commands found. Run again without -ToolchainCheck to build.'
@@ -122,23 +127,29 @@ if (!$changes.Count) {
 }
 $headers = Get-PinnedSource 'OpenCL-Headers' $lock.opencl.headers.repo $lock.opencl.headers.commit
 $icd = Get-PinnedSource 'OpenCL-ICD-Loader' $lock.opencl.loader.repo $lock.opencl.loader.commit
-$voxt = Get-PinnedSource 'sglang-omni' $lock.voxt.repo $lock.voxt.public_commit
+$toolchainVersion = $clangVersion
+$fileNames = @('qwen3_asr_server.exe', 'OpenCL.dll')
+if (!$BackendOnly) {
+    $voxt = Get-PinnedSource 'sglang-omni' $lock.voxt.repo $lock.voxt.public_commit
 
-# Always prepare the current runner sources afresh, with Git's downloads cached separately.
-$runnerSource = Join-Path $build ('runner-source-' + [guid]::NewGuid())
-$previousGoEnv = @{}
-foreach ($name in @('GOOS', 'GOARCH', 'CGO_ENABLED', 'GOTOOLCHAIN')) { $previousGoEnv[$name] = [Environment]::GetEnvironmentVariable($name) }
-try {
-    Invoke-BuildTool $python @((Join-Path $root 'scripts/prepare_benchmark.py'), '--voxt-repo', $voxt, '--destination', $runnerSource, '--runner-only')
-    $env:GOOS = 'windows'
-    $env:GOARCH = 'arm64'
-    $env:CGO_ENABLED = '0'
-    $env:GOTOOLCHAIN = 'local'
-    $goVersion = Invoke-BuildTool go @('version')
-    Invoke-BuildTool go @('-C', (Join-Path $runnerSource 'Voxt'), 'build', '-mod=readonly', '-o', (Join-Path $bin 'final-benchmark.exe'), './cmd/final-benchmark')
-} finally {
-    foreach ($name in $previousGoEnv.Keys) { [Environment]::SetEnvironmentVariable($name, $previousGoEnv[$name]) }
-    if (Test-Path -LiteralPath $runnerSource) { Remove-Item -LiteralPath $runnerSource -Recurse -Force }
+    # Prepare the current runner sources afresh, with Git downloads cached separately.
+    $runnerSource = Join-Path $build ('runner-source-' + [guid]::NewGuid())
+    $previousGoEnv = @{}
+    foreach ($name in @('GOOS', 'GOARCH', 'CGO_ENABLED', 'GOTOOLCHAIN')) { $previousGoEnv[$name] = [Environment]::GetEnvironmentVariable($name) }
+    try {
+        Invoke-BuildTool $python @((Join-Path $root 'scripts/prepare_benchmark.py'), '--voxt-repo', $voxt, '--destination', $runnerSource, '--runner-only')
+        $env:GOOS = 'windows'
+        $env:GOARCH = 'arm64'
+        $env:CGO_ENABLED = '0'
+        $env:GOTOOLCHAIN = 'local'
+        $goVersion = Invoke-BuildTool go @('version')
+        Invoke-BuildTool go @('-C', (Join-Path $runnerSource 'Voxt'), 'build', '-mod=readonly', '-o', (Join-Path $bin 'final-benchmark.exe'), './cmd/final-benchmark')
+        $toolchainVersion += " | $goVersion"
+        $fileNames += 'final-benchmark.exe'
+    } finally {
+        foreach ($name in $previousGoEnv.Keys) { [Environment]::SetEnvironmentVariable($name, $previousGoEnv[$name]) }
+        if (Test-Path -LiteralPath $runnerSource) { Remove-Item -LiteralPath $runnerSource -Recurse -Force }
+    }
 }
 
 $toolchain = Join-Path $llama 'cmake/arm64-windows-llvm.cmake'
@@ -162,15 +173,16 @@ Invoke-BuildTool cmake @('--build', $llamaBuild, '--target', 'qwen3_asr_server',
 Copy-Item -LiteralPath (Join-Path $llamaBuild 'bin/qwen3_asr_server.exe'), (Join-Path $icdBuild 'OpenCL.dll') -Destination $bin -Force
 
 $files = [ordered]@{}
-foreach ($name in @('qwen3_asr_server.exe', 'OpenCL.dll', 'final-benchmark.exe')) {
+foreach ($name in $fileNames) {
     $path = Join-Path $bin $name
     Assert-Arm64PE $path
     $files[$name] = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
 }
 $manifest = [ordered]@{
-    commit=$sourceCommit; llama_cpp=$lock.llama_cpp.commit; voxt=$lock.voxt.public_commit
+    commit=$sourceCommit; llama_cpp=$lock.llama_cpp.commit
     opencl_loader=$lock.opencl.loader.commit; opencl_headers=$lock.opencl.headers.commit
-    toolchain="$clangVersion | $goVersion"; build=$backendFlags -join ' '; files=$files
+    toolchain=$toolchainVersion; build=$backendFlags -join ' '; files=$files
 }
+if (!$BackendOnly) { $manifest.voxt = $lock.voxt.public_commit }
 $manifest | ConvertTo-Json -Depth 5 | Set-Content -Encoding UTF8 -LiteralPath (Join-Path $build 'verify_native_manifest.json')
-Write-Output "Native ARM64 runtime and benchmark built at: $build"
+Write-Output "Native ARM64 build ready at: $build"

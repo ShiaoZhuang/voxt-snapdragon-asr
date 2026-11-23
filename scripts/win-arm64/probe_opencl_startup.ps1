@@ -1,13 +1,51 @@
 [CmdletBinding()]
 param(
     [string]$InstallDirectory = (Join-Path $PSScriptRoot '../../dist/voxt-snapdragon-veri-1'),
-    [string]$ReportPath = (Join-Path ([IO.Path]::GetTempPath()) ('voxt-opencl-startup-' + (Get-Date -Format 'yyyyMMdd-HHmmss-fff') + '.txt'))
+    [string]$ReportPath = (Join-Path ([IO.Path]::GetTempPath()) ('voxt-opencl-startup-' + (Get-Date -Format 'yyyyMMdd-HHmmss-fff') + '.txt')),
+    [string]$NativeBuildDirectory,
+    [switch]$Transcribe
 )
 
 $ErrorActionPreference = 'Stop'
 $ReportPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ReportPath)
 $serverName = 'qwen3_asr_server.exe'
 $since = (Get-Date).AddDays(-2)
+
+function Invoke-ClipProbe([int]$Port, [string]$Audio) {
+    Add-Type -AssemblyName System.Net.Http
+    $handler = [Net.Http.HttpClientHandler]::new()
+    $handler.UseProxy = $false
+    $handler.AllowAutoRedirect = $false
+    $client = [Net.Http.HttpClient]::new($handler)
+    $client.Timeout = [TimeSpan]::FromSeconds(120)
+    $form = [Net.Http.MultipartFormDataContent]::new()
+    try {
+        $wav = [Net.Http.StreamContent]::new([IO.File]::OpenRead($Audio))
+        $wav.Headers.ContentType = [Net.Http.Headers.MediaTypeHeaderValue]::new('audio/wav')
+        $form.Add($wav, 'file', [IO.Path]::GetFileName($Audio))
+        $form.Add([Net.Http.StringContent]::new('zh'), 'language')
+        $form.Add([Net.Http.StringContent]::new('true'), 'stream')
+        $form.Add([Net.Http.StringContent]::new('true'), 'include_generation_metadata')
+        $form.Add([Net.Http.StringContent]::new('256'), 'max_new_tokens')
+        $timer = [Diagnostics.Stopwatch]::StartNew()
+        $response = $client.PostAsync("http://127.0.0.1:$Port/v1/audio/transcriptions", $form).GetAwaiter().GetResult()
+        try {
+            $body = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+            "Transcription HTTP $([int]$response.StatusCode) | Wall ms: $($timer.ElapsedMilliseconds)"
+            $body.TrimEnd()
+            $events = @($body -split '\r?\n' | Where-Object { $_ -match '^data: ' } | ForEach-Object { $_.Substring(6) })
+            $done = $events | Where-Object { $_ -ne '[DONE]' } | ForEach-Object { $_ | ConvertFrom-Json } |
+                Where-Object type -eq 'transcript.text.done' | Select-Object -Last 1
+            if (!$response.IsSuccessStatusCode -or !($events -contains '[DONE]') -or !$done.text -or !$done.generation_metadata) {
+                throw 'Expected a nonempty transcript and a complete SSE response with generation metadata.'
+            }
+            'Transcription probe: PASS'
+        } finally { $response.Dispose() }
+    } finally {
+        $form.Dispose()
+        $client.Dispose()
+    }
+}
 
 & {
     '=== Voxt OpenCL Target startup ==='
@@ -18,10 +56,23 @@ $since = (Get-Date).AddDays(-2)
     try {
         $root = (Resolve-Path -LiteralPath $InstallDirectory).Path
         $server = Join-Path $root "bin/$serverName"
+        if ($NativeBuildDirectory) {
+            $nativeRoot = (Resolve-Path -LiteralPath $NativeBuildDirectory).Path
+            $nativeBuild = Get-Content -Raw -LiteralPath (Join-Path $nativeRoot 'verify_native_manifest.json') | ConvertFrom-Json
+            "Native Windows build: $($nativeBuild.commit) | compiler: $($nativeBuild.toolchain)"
+            foreach ($name in @($serverName, 'OpenCL.dll')) {
+                $hash = (Get-FileHash -LiteralPath (Join-Path $nativeRoot "bin/$name") -Algorithm SHA256).Hash
+                if ($hash -ne $nativeBuild.files.$name) { throw "Native build SHA-256 mismatch: $name" }
+                "Native SHA-256 $name $hash"
+            }
+            $server = Join-Path $nativeRoot "bin/$serverName"
+        }
         $models = Join-Path $root 'models'
         foreach ($path in @($server, (Join-Path $models 'target.gguf'), (Join-Path $models 'mmproj.gguf'))) {
             if (!(Test-Path -LiteralPath $path -PathType Leaf)) { throw "Missing $path" }
         }
+        $audio = Join-Path $root 'eval/zh-plain-1.wav'
+        if ($Transcribe -and !(Test-Path -LiteralPath $audio -PathType Leaf)) { throw "Missing $audio" }
 
         $start = [Diagnostics.ProcessStartInfo]::new($server)
         $start.Arguments = '--supervised --host 127.0.0.1 --port 0 --backend opencl --model-directory "' + $models + '"'
@@ -40,6 +91,16 @@ $since = (Get-Date).AddDays(-2)
         if ($firstLine.Wait(90000)) {
             $line = $firstLine.GetAwaiter().GetResult()
             if ($line) { "First stdout line: $line" }
+            if ($Transcribe -and $line) {
+                try {
+                    $ready = $line | ConvertFrom-Json
+                    $port = [int]$ready.port
+                    if ($ready.event -ne 'ready' -or $ready.host -ne '127.0.0.1' -or $port -lt 1 -or $port -gt 65535) {
+                        throw 'Invalid supervised ready event.'
+                    }
+                    Invoke-ClipProbe $port $audio
+                } catch { "Transcription probe: FAIL. $_" }
+            }
         } else {
             'No ready event after 90 seconds.'
         }

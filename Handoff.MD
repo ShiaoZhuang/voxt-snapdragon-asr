@@ -2,16 +2,23 @@
 
 ## 骁龙本从源码构建与验收
 
-在骁龙本的 PowerShell 中打开源码仓库根目录。脚本会定位已安装的 Visual Studio，尝试初始化 ARM64 开发环境，并查找常见安装目录下的 CMake、Ninja、Clang 和 Go。也可从已配置 ARM64 的 Visual Studio Developer PowerShell 直接运行。首次构建会拉取固定版本的上游源码和 Go 模块。[Visual Studio 开发人员 PowerShell](https://learn.microsoft.com/en-us/visualstudio/ide/reference/command-prompt-powershell)
+在骁龙本的 PowerShell 中打开源码仓库根目录。脚本会使用已有的 Visual Studio ARM64 环境、CMake、Ninja 和 Python。需要公司批准的 Clang，可使用 Visual Studio 的 **C++ Clang Compiler for Windows** 组件。锁定的 Windows ARM64 OpenCL 后端要求 Clang，Visual Studio 提供 Windows 链接所需的头文件和库。[llama.cpp 构建要求](https://github.com/ggml-org/llama.cpp/blob/e412c6f468b7b9e0f16f2540244236f8ad68e9ae/docs/backend/OPENCL.md#L196)
 
 ```powershell
-git fetch origin tag veri-1-native-toolchain
-git switch --detach veri-1-native-toolchain
+git fetch origin tag veri-1-native-backend
+git switch --detach veri-1-native-backend
+.\scripts\win-arm64\build_native.ps1 -BackendOnly
+.\scripts\win-arm64\probe_opencl_startup.ps1 -NativeBuildDirectory .\build\win-arm64-native -Transcribe
+```
+
+只检查工具时运行 `build_native.ps1 -BackendOnly -ToolchainCheck`。后端快测复用已有 Veri 1 模型和 `zh-plain-1.wav`，不用 Go。成功会记录 `Transcription probe: PASS`，回传 `Report saved to:` 指向的文本文件即可。
+
+安装公司批准的 Go 1.27.1+ 后，从同一源码标签执行完整快测：
+
+```powershell
 .\scripts\win-arm64\build_native.ps1
 .\scripts\win-arm64\run_verify.ps1 -NativeBuildDirectory .\build\win-arm64-native -Quick
 ```
-
-如果工具检查报错，可以用 `build_native.ps1 -ToolchainCheck` 单独查看命令路径和缺失项。Visual Studio 的 **C++ CMake tools for Windows** 提供 CMake/Ninja，**C++ Clang Compiler for Windows** 提供 Clang。Go 1.27.1+ 和 Python 3.11+ 使用公司批准的安装。只需补齐脚本仍报告缺少的工具。
 
 构建在骁龙本生成后端、OpenCL loader 和评测器。继续使用 `dist\voxt-snapdragon-veri-1` 的现有模型、评测集和资产清单。若资产在其他目录，用 `-InstallDirectory` 指向该目录。复验通过条件为四组快测 PASS，OpenCL DFlash 有候选被接收并与同设备的 Target-only 逐 token 一致。
 
