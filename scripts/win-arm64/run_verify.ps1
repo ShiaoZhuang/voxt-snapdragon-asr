@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param([switch]$Quick, [string]$OutputDirectory, [string]$InstallDirectory, [switch]$OpenCLFix)
+param([switch]$Quick, [string]$OutputDirectory, [string]$InstallDirectory, [switch]$OpenCLFix, [string]$NativeBuildDirectory)
 
 $ErrorActionPreference = 'Stop'
 $scriptRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '../..')).Path
@@ -18,6 +18,7 @@ $output = (New-Item -ItemType Directory -Path $OutputDirectory).FullName
 $report = [System.Collections.Generic.List[string]]::new()
 $matrix = [ordered]@{}
 $runtimeUpdate = $null
+$nativeBuild = $null
 $passed = $true
 $previousBackend = $env:VOXT_ASR_BACKEND
 $previousTrace = $env:VOXT_ASR_TRACE
@@ -71,6 +72,7 @@ function Get-RunTotals($Rows) {
 }
 
 try {
+    if ($OpenCLFix -and $NativeBuildDirectory) { throw 'Specify either -OpenCLFix or -NativeBuildDirectory.' }
     # An emulated PowerShell process can report its own architecture.
     $osArch = $env:PROCESSOR_ARCHITEW6432
     if (!$osArch) { $osArch = $env:PROCESSOR_ARCHITECTURE }
@@ -84,11 +86,12 @@ try {
     $report.Add("Build flags: $($manifest.build)")
     $report.Add("Weight types: $($manifest.weights)")
     foreach ($property in $manifest.files.PSObject.Properties) {
+        if ($NativeBuildDirectory -and $property.Name -notmatch '^(models|eval)/') { continue }
         $path = Join-Path $root $property.Name
         $actual = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
         if ($actual.ToLowerInvariant() -ne $property.Value) { throw "SHA-256 mismatch: $($property.Name)" }
     }
-    $report.Add('Manifest hashes: passed')
+    $report.Add($(if ($NativeBuildDirectory) { 'Installed model and evaluation hashes: passed' } else { 'Manifest hashes: passed' }))
     try {
         $computer = Get-CimInstance Win32_ComputerSystem
         $report.Add("Machine: $($computer.Manufacturer) $($computer.Model), $([math]::Round($computer.TotalPhysicalMemory / 1GB, 1)) GiB RAM")
@@ -98,6 +101,25 @@ try {
     } catch { $report.Add("CIM inventory: $_") }
 
     $server = Join-Path $root 'bin/qwen3_asr_server.exe'
+    $runner = Join-Path $root 'bin/final-benchmark.exe'
+    if ($NativeBuildDirectory) {
+        $localRoot = (Resolve-Path -LiteralPath $NativeBuildDirectory).Path
+        $nativeBuild = Get-Content -Raw -LiteralPath (Join-Path $localRoot 'verify_native_manifest.json') | ConvertFrom-Json
+        $report.Add("Native Windows build: $($nativeBuild.commit)")
+        $report.Add("Native llama.cpp source: $($nativeBuild.llama_cpp)")
+        $report.Add("Native Voxt runner source: $($nativeBuild.voxt)")
+        $report.Add("Native OpenCL loader source: $($nativeBuild.opencl_loader)")
+        $report.Add("Native toolchain: $($nativeBuild.toolchain)")
+        $report.Add("Native build flags: $($nativeBuild.build)")
+        $localBin = Join-Path $localRoot 'bin'
+        foreach ($name in @('qwen3_asr_server.exe', 'OpenCL.dll', 'final-benchmark.exe')) {
+            $hash = (Get-FileHash -LiteralPath (Join-Path $localBin $name) -Algorithm SHA256).Hash
+            if ($hash -ne $nativeBuild.files.$name) { throw "Native build SHA-256 mismatch: $name" }
+            $report.Add("Native SHA-256 $name $($nativeBuild.files.$name)")
+        }
+        $server = Join-Path $localBin 'qwen3_asr_server.exe'
+        $runner = Join-Path $localBin 'final-benchmark.exe'
+    }
     if ($OpenCLFix) {
         $fix = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'veri1-opencl-fix.json') | ConvertFrom-Json
         $server = Join-Path $root "bin/$($fix.server)"
@@ -107,7 +129,6 @@ try {
         $runtimeUpdate = [ordered]@{ source_commit=$fix.source_commit; server_sha256=$fix.server_sha256 }
         $report.Add("OpenCL fix runtime: $($fix.source_commit) ($($fix.server_sha256))")
     }
-    $runner = Join-Path $root 'bin/final-benchmark.exe'
     $models = Join-Path $root 'models'
     $eval = Join-Path $root 'eval'
     $devices = Join-Path $output 'devices'
@@ -229,6 +250,7 @@ try {
     $report | Set-Content -Encoding UTF8 -LiteralPath (Join-Path $output 'verify_report.md')
     $stats = [ordered]@{ passed=$passed; quick=[bool]$Quick; runs=$matrix }
     if ($runtimeUpdate) { $stats.runtime_update = $runtimeUpdate }
+    if ($nativeBuild) { $stats.native_build = $nativeBuild }
     $stats | ConvertTo-Json -Depth 20 |
         Set-Content -Encoding UTF8 -LiteralPath (Join-Path $output 'verify_stats.json')
     Write-Output "Results: $output"

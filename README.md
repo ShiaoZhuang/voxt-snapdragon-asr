@@ -48,6 +48,8 @@ Mac 可用 `scripts/build_voxt_backend.sh` 构建 `qwen3_asr_server`。脚本在
 
 在 Mac 上运行 `scripts/win-arm64/build_on_mac.sh` 构建 Windows ARM64 + Adreno OpenCL，再运行 `python3 scripts/win-arm64/package_on_mac.py dist/voxt-snapdragon-veri-1` 组装可拷贝的离线目录。运行目录可含空格。实机命令与回传文件见 [Handoff.MD](Handoff.MD)。
 
+公司骁龙本可在 ARM64 Visual Studio Developer PowerShell 中运行 `scripts/win-arm64/build_native.ps1`，用本机工具链从固定源码构建后端、OpenCL loader 与 Go 评测器。使用 `run_verify.ps1 -NativeBuildDirectory .\build\win-arm64-native -Quick` 复用已有 Veri 1 模型和评测集。
+
 ## 从 GitHub 获取 Veri 1
 
 在骁龙本使用 PowerShell。克隆只取源码，下载脚本会从同一个 GitHub 仓库的 Release 组装程序、评测音频和模型，再逐个核对 SHA-256。已校验的模型可在重跑时复用。网络需要能跟随 GitHub Release 的资产下载重定向。

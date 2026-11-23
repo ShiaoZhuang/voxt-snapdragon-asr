@@ -39,8 +39,8 @@ MacBook 负责开发、模型转换、数值对照和优先产包。骁龙笔记
 
 - **仓库归属与内容。** 在用户的 GitHub 账户下使用公开仓库，发布可从干净 clone 重建的源码、上游版本锁、脚本、许可证说明和简短进展。普通 Git 提交只收工程文件。权重、测试音频、构建物和运行日志均放在 Git 历史之外。进展记录分别写明 Mac 已验证、待骁龙验证及实机结果。
 - **提交与验收分开。** 开发按可测试的小步正常 commit。只有准备交给骁龙实机验证的大阶段提交，标题从第一个字符起写 `Veri`，例如 `Veri: validate Adreno DFlash against Oryon baseline`。该提交表示「可开始实机验收」。每轮用指向该 commit 的固定 tag 关联测试包、SHA-256 清单和回传报告。下一轮可以据此精确复现上一轮。
-- **分发优先顺序。** 首选 Mac 交叉编译 ARM64 EXE/DLL，检查 PE 架构与依赖，发布匹配 tag 的 GitHub Release 包。首包配齐公开评测数据、模型清单和首次所需模型资产；大模型可分卷，后续按哈希复用。测试包可由人直接拷贝。若公司网络仅能 clone，则从同 tag 取得脚本、从本地介质补齐资产；必要时用随仓的 PowerShell 构建入口在骁龙机编译，仍运行同一套验收。交付时将实际可用的入口写入交接页。[上游 Windows OpenCL 构建](https://github.com/ggml-org/llama.cpp/blob/e412c6f468b7b9e0f16f2540244236f8ad68e9ae/.github/workflows/build-opencl.yml)
-- **每轮交接一页。** 每个 Veri 提交更新仓库根目录的 `Handoff.MD`，同时随包附上。按「本轮验证什么 → 取哪个 tag 和包 → 在哪里运行哪一条命令 → 怎样算通过 → 回传什么」书写，供人和骁龙端 Agent 直接照做。预编译路径的入口固定为 `scripts/win-arm64/run_verify.ps1`。本地编译是备用步骤，放在主命令下方。
+- **分发优先顺序。** 公司骁龙机从 GitHub 固定标签获取源码和构建脚本，使用获批准的 Windows ARM64 工具链在本机编译后端、OpenCL loader 和评测器，再运行同一套验收。模型与评测集按哈希复用。Mac 交叉编译可用于开发检查，预编译包可供允许执行该产物的环境使用。交付时将适用的入口写入交接页。[上游 Windows OpenCL 构建](https://github.com/ggml-org/llama.cpp/blob/e412c6f468b7b9e0f16f2540244236f8ad68e9ae/.github/workflows/build-opencl.yml)
+- **每轮交接一页。** 每个 Veri 提交更新仓库根目录的 `Handoff.MD`。按「本轮验证什么 → 取哪个 tag → 在哪里运行 → 怎样算通过 → 回传什么」书写，供人和骁龙端 Agent 直接照做。源码交付使用 `scripts/win-arm64/build_native.ps1`，随后用 `scripts/win-arm64/run_verify.ps1` 验收。
 - **失败也能交接。** 脚本先校验 ARM64、模型和运行库哈希、设备、驱动与内存，运行一条 sanity 后执行本轮矩阵。通过一份可直接阅读的 `verify_report.md` 回传结论，另附 `verify_stats.json` 供 Mac 自动分析。报告包含 tag/commit、编译参数、实际设备、dtype、逐条成绩、耗时、前 3 轮 Draft/Target token 对照及首个失败步骤。实机报告默认由用户带回 Mac，公开进展使用汇总结果。
 
 ## 5. Windows 桌面与实时听写

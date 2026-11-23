@@ -1,5 +1,20 @@
 # Veri 1 骁龙实机验收
 
+## 骁龙本从源码构建与验收
+
+使用公司批准的开发工具，在面向 ARM64 目标的 Visual Studio Developer PowerShell 中打开源码仓库根目录。已有的 Visual Studio C++ ARM64 组件和 Windows SDK 可以直接复用。构建还需要 `clang`、`clang++`、CMake、Ninja、Git、Python 3.11+ 和 Go 1.27.1+。脚本先检查命令是否可用，首次构建会拉取固定版本的上游源码和 Go 模块。[Visual Studio ARM64 工具链](https://learn.microsoft.com/en-us/visualstudio/install/visual-studio-on-arm-devices)
+
+```powershell
+git fetch origin tag veri-1-native-arm64
+git switch --detach veri-1-native-arm64
+.\scripts\win-arm64\build_native.ps1
+.\scripts\win-arm64\run_verify.ps1 -NativeBuildDirectory .\build\win-arm64-native -Quick
+```
+
+构建在骁龙本生成后端、OpenCL loader 和评测器。继续使用 `dist\voxt-snapdragon-veri-1` 的现有模型、评测集和资产清单。若资产在其他目录，用 `-InstallDirectory` 指向该目录。复验通过条件为四组快测 PASS，OpenCL DFlash 有候选被接收并与同设备的 Target-only 逐 token 一致。
+
+回传 `Results:` 目录内的 `verify_report.md` 和 `verify_stats.json`。若构建失败，回传第一条工具错误及其上下文。若公司策略拦截本机构建的程序，按 IT 的软件审批流程处理。
+
 ## OpenCL 启动修复复验
 
 在已安装 Veri 1 的骁龙本上，从源码仓库根目录运行：

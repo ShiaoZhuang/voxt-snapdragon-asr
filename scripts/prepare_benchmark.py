@@ -4,6 +4,7 @@
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -19,6 +20,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--voxt-repo", type=Path, required=True)
     parser.add_argument("--destination", type=Path, required=True)
+    parser.add_argument("--runner-only", action="store_true", help="Prepare only the Go runner and its sources")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     lock = json.loads((root / "sources.lock.json").read_text())
@@ -31,18 +33,19 @@ def main():
     with tempfile.TemporaryDirectory(dir=destination.parent) as staging:
         checkout = Path(staging) / "source"
         checkout.mkdir()
-        with tempfile.TemporaryFile() as archive:
-            subprocess.run(
-                ["git", "-C", str(repo), "archive", revision, "Voxt", "sglang_omni_mlx"],
-                stdout=archive, check=True,
-            )
-            archive.seek(0)
-            subprocess.run(["tar", "-xf", "-", "-C", str(checkout)], stdin=archive, check=True)
-        with (root / "patches/voxt-mlx-baseline.patch").open("rb") as patch:
-            subprocess.run(["patch", "-s", "-p1"], cwd=checkout, stdin=patch, check=True)
-        for path, expected in lock["benchmark"].items():
-            if digest(checkout / path) != expected:
-                raise ValueError(f"benchmark SHA-256 mismatch: {path}")
+        paths = ["Voxt/internal", "Voxt/go.mod", "Voxt/go.sum"] if args.runner_only else ["Voxt", "sglang_omni_mlx"]
+        archive = Path(staging) / "source.tar"
+        subprocess.run(["git", "-C", str(repo), "archive", f"--output={archive}", revision, *paths], check=True)
+        shutil.unpack_archive(archive, checkout)
+        patch_args = ["--include=Voxt/internal/omni/*"] if args.runner_only else []
+        subprocess.run(
+            ["git", "apply", "--no-index", *patch_args, str(root / "patches/voxt-mlx-baseline.patch")],
+            cwd=checkout, env={**os.environ, "GIT_CEILING_DIRECTORIES": staging}, check=True,
+        )
+        if not args.runner_only:
+            for path, expected in lock["benchmark"].items():
+                if digest(checkout / path) != expected:
+                    raise ValueError(f"benchmark SHA-256 mismatch: {path}")
 
         # Observe the exact final SSE payload that Voxt accepted. The parser,
         # request policy, and production source checkout are unchanged.
@@ -51,7 +54,8 @@ def main():
         marker = "\t\tif res != nil {\n\t\t\tdone = res\n"
         if source.count(marker) != 1:
             raise ValueError("cannot locate the pinned Voxt SSE observer point")
-        client.write_text(source.replace(marker, marker + '\t\t\tl.s.rt.logf("debug", "benchmark_sse "+payload)\n'))
+        with client.open("w", encoding="utf-8", newline="\n") as output:
+            output.write(source.replace(marker, marker + '\t\t\tl.s.rt.logf("debug", "benchmark_sse "+payload)\n'))
         driver = checkout / "Voxt/cmd/final-benchmark"
         driver.mkdir(parents=True)
         shutil.copyfile(root / "benchmark/final.go", driver / "main.go")

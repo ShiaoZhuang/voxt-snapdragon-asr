@@ -34,8 +34,8 @@ fetch_khronos() {
   fi
 }
 
-headers_revision=6fe718c31a45fe25151362a72ef041c3a1047cbd
-loader_revision=b7bd2803acc779c03d96588e9ca9e9568a18698a
+headers_revision=$(jq -er .opencl.headers.commit sources.lock.json)
+loader_revision=$(jq -er .opencl.loader.commit sources.lock.json)
 fetch_khronos OpenCL-Headers "$headers_revision"
 fetch_khronos OpenCL-ICD-Loader "$loader_revision"
 loader_build="$root/build/opencl-icd-arm64"
