@@ -46,6 +46,8 @@ MacBook 负责开发、模型转换、数值对照和优先产包。骁龙笔记
 
 先用固定验收入口在获准的 Windows ARM64 Python 环境运行 `tools/qnn-probe/projection.py`。探针生成 `[8,2048] × [2048,6144]` 的静态 QDQ 投影，激活 U16、权重 U8，使用合成输入和权重。要求禁止 CPU fallback、输出通过独立整数参考校验、ORT profiling 含 QAIRT backend execute 事件。它验证 HTP 运行时和一个真实尺寸的投影，整块 Target、真实量化权重、KV 更新和转录质量仍由下述回放验证。[QNN EP v2.8.0 插件与 profiling](https://github.com/onnxruntime/onnxruntime-qnn/blob/v2.8.0/docs/execution_providers/QNN-ExecutionProvider.md)
 
+骁龙本 `3043399` 已通过该探针。扩大 A16 编码范围后最大误差为 1 步，49,152 个输出均在门槛内，记录到 216 个 QAIRT execute 事件，进程正常退出。30 次热态主机往返中位数/P95 为 0.907/1.468 ms。默认与关闭 LUT 两组均有后端执行事件，最大误差均为 32 步。这个对照把下一轮的重点放在真实激活和权重的编码与误差上。
+
 当前 Target 是 28 层、8 个 KV 头、K/V 头维均为 128，默认 FP16 KV 每个位置 112 KiB。完整 KV 在 2,048/8,192 位置分别约 224/896 MiB，每轮的八位置增量约 896 KiB。三层 FP16 aux 的八位置有效数据为 96 KiB。若回读全部八行 FP32 logits，还需约 4.64 MiB。上述为逻辑张量大小，实际拷贝量要按布局、分配与同步实测。连续解码应让 Target KV 常驻同一设备，首次做 prefill 和 KV 交接后只提交被接受的位置；单独计量跨设备 aux、logits 及必要的 KV 增量。
 
 优先通过 QNN EP 的 HTP 后端建立设备对照。并行评估 llama.cpp 的 Hexagon 路径能否复用现有 GGUF 图和取样逻辑。Windows 上该路径依赖受信任签名的 HTP 算子库，实机可用性按公司设备的软件审批状态验证。[llama.cpp Windows Hexagon 指南](https://github.com/ggml-org/llama.cpp/blob/e412c6f468b7b9e0f16f2540244236f8ad68e9ae/docs/backend/snapdragon/windows.md)
