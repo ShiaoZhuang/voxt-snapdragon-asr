@@ -1,12 +1,29 @@
 # Veri 1 骁龙实机验收
 
+## 固定入口
+
+在骁龙本仓库根目录首次获取启动脚本：
+
+```powershell
+git fetch origin tag veri-1-auto-handoff
+git switch --detach veri-1-auto-handoff
+```
+
+以后每轮在同一仓库根目录运行同一条命令：
+
+```powershell
+.\scripts\win-arm64\update_and_verify.ps1
+```
+
+启动脚本从本仓库的 `veri/native-win-arm64` 分支同步最新提交到专用工作目录，然后运行该提交指定的验证任务。当前任务是本机编译 OpenCL 后端并用现有模型转录 `zh-plain-1.wav`。如果模型在自定义目录，运行时加 `-InstallDirectory`。
+
+结束后拍屏幕上的 **VOXT SNAPDRAGON REPORT** 整段，包含提交、通过状态、关键错误和日志位置。完整输出、探针报告和文本摘要保存在 `Logs:` 指向的目录。
+
 ## 骁龙本从源码构建与验收
 
 在骁龙本的 PowerShell 中打开源码仓库根目录。脚本会使用已有的 Visual Studio ARM64 环境、CMake、Ninja 和 Python。需要公司批准的 Clang，可使用 Visual Studio 的 **C++ Clang Compiler for Windows** 组件。锁定的 Windows ARM64 OpenCL 后端要求 Clang，Visual Studio 提供 Windows 链接所需的头文件和库。[llama.cpp 构建要求](https://github.com/ggml-org/llama.cpp/blob/e412c6f468b7b9e0f16f2540244236f8ad68e9ae/docs/backend/OPENCL.md#L196)
 
 ```powershell
-git fetch origin tag veri-1-native-backend
-git switch --detach veri-1-native-backend
 .\scripts\win-arm64\build_native.ps1 -BackendOnly
 .\scripts\win-arm64\probe_opencl_startup.ps1 -NativeBuildDirectory .\build\win-arm64-native -Transcribe
 ```
