@@ -300,3 +300,79 @@
  
  std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
              const server_http_req & req,
+diff --git a/ggml/src/ggml-opencl/ggml-opencl.cpp b/ggml/src/ggml-opencl/ggml-opencl.cpp
+--- a/ggml/src/ggml-opencl/ggml-opencl.cpp
++++ b/ggml/src/ggml-opencl/ggml-opencl.cpp
+@@ -481,6 +481,8 @@
+     std::regex *opfilter = nullptr; // regex of ops to not claim
+     std::string opfilter_str = ""; // regex string for opfilter
+     size_t global_mem_size = 0;
++    size_t max_alloc_size = 0;
++    cl_uint alignment = 0;
+ };
+ 
+ // Lazily-compiled flash-attention kernels and their per-(dk,dv) tile metadata.
+@@ -9254,6 +9256,16 @@
+ 
+     clGetDeviceInfo(dev_ctx->device, CL_DEVICE_GLOBAL_MEM_SIZE, sizeof(size_t), &dev_ctx->global_mem_size, NULL);
+ 
++    // Buffer sizing can run before a command queue or its backend context exists.
++    cl_uint base_align_in_bits;
++    CL_CHECK(clGetDeviceInfo(dev_ctx->device, CL_DEVICE_MEM_BASE_ADDR_ALIGN, sizeof(base_align_in_bits), &base_align_in_bits, NULL));
++    GGML_ASSERT(base_align_in_bits > 0 && base_align_in_bits % 8u == 0);
++    dev_ctx->alignment = base_align_in_bits / 8u;
++
++    cl_ulong max_alloc_size;
++    CL_CHECK(clGetDeviceInfo(dev_ctx->device, CL_DEVICE_MAX_MEM_ALLOC_SIZE, sizeof(max_alloc_size), &max_alloc_size, NULL));
++    dev_ctx->max_alloc_size = static_cast<size_t>(std::min<cl_ulong>(max_alloc_size, SIZE_MAX));
++
+     const char * str_opfilter = getenv("GGML_OPENCL_OPFILTER");
+     if (str_opfilter) {
+         dev_ctx->opfilter_str = str_opfilter;
+@@ -9359,14 +9371,10 @@
+     backend_ctx->has_integer_dot =
+         strstr(ext_buffer.data(), "cl_khr_integer_dot_product") != NULL;
+ 
+-    cl_uint base_align_in_bits;
+-    CL_CHECK(clGetDeviceInfo(device, CL_DEVICE_MEM_BASE_ADDR_ALIGN, sizeof(cl_uint), &base_align_in_bits, NULL));
+-    GGML_ASSERT(base_align_in_bits % 8u == 0);
+-    backend_ctx->alignment = base_align_in_bits / 8u;
+-
++    backend_ctx->alignment = dev_ctx->alignment;
+     backend_ctx->global_mem_size = dev_ctx->global_mem_size;
+-
+-    CL_CHECK(clGetDeviceInfo(device, CL_DEVICE_MAX_MEM_ALLOC_SIZE, sizeof(size_t), &backend_ctx->max_alloc_size, NULL));
++    backend_ctx->max_alloc_size = dev_ctx->max_alloc_size;
++
+     CL_CHECK(clGetDeviceInfo(device, CL_DEVICE_IMAGE_MAX_BUFFER_SIZE, sizeof(size_t), &backend_ctx->image_max_buffer_size, NULL));
+     CL_CHECK(clGetDeviceInfo(device, CL_DEVICE_IMAGE2D_MAX_WIDTH, sizeof(size_t), &backend_ctx->image2d_max_width, NULL));
+     CL_CHECK(clGetDeviceInfo(device, CL_DEVICE_IMAGE2D_MAX_HEIGHT, sizeof(size_t), &backend_ctx->image2d_max_height, NULL));
+@@ -17846,16 +17854,12 @@
+ 
+ static size_t ggml_backend_opencl_buffer_type_get_alignment(ggml_backend_buffer_type_t buffer_type) {
+     ggml_backend_opencl_device_context * dev_ctx = (ggml_backend_opencl_device_context *) buffer_type->device->context;
+-    return dev_ctx->backend_ctx->alignment;
++    return dev_ctx->alignment;
+ }
+ 
+ static size_t ggml_backend_opencl_buffer_type_get_max_size(ggml_backend_buffer_type_t buffer_type) {
+-    static size_t max_size = -1;
+-    if (max_size == (size_t)-1) {
+-        ggml_backend_opencl_device_context * dev_ctx = (ggml_backend_opencl_device_context *) buffer_type->device->context;
+-        max_size = dev_ctx->backend_ctx->max_alloc_size;
+-    }
+-    return max_size;
++    ggml_backend_opencl_device_context * dev_ctx = (ggml_backend_opencl_device_context *) buffer_type->device->context;
++    return dev_ctx->max_alloc_size;
+ }
+ 
+ static bool ggml_backend_opencl_buffer_type_supports_backend(ggml_backend_buffer_type_t buft, ggml_backend_t backend) {
+@@ -17876,7 +17880,7 @@
+     // carve slack: at most 5 components (q5_K), i.e. 4 aligned gaps.
+     if (ggml_is_quantized(tensor->type)) {
+         ggml_backend_opencl_device_context * dev_ctx = (ggml_backend_opencl_device_context *) buft->device->context;
+-        size += 4 * dev_ctx->backend_ctx->alignment;
++        size += 4 * dev_ctx->alignment;
+     }
+ #endif // GGML_OPENCL_SOA_Q
+     return size;
