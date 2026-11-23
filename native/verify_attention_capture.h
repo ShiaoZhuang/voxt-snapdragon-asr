@@ -23,7 +23,8 @@ public:
         return (node->op == GGML_OP_FLASH_ATTN_EXT && query && query->ne[0] == 128 &&
                 query->ne[1] == 8 && query->ne[2] == 16 && query->ne[3] == 1) ||
                std::strcmp(name, "kq-0") == 0 || std::strcmp(name, "kq_soft_max-0") == 0 ||
-               std::strcmp(name, "kqv-0") == 0;
+               std::strcmp(name, "kqv-0") == 0 || std::strcmp(name, "Kcur-0") == 0 ||
+               std::strcmp(name, "Vcur-0") == 0;
     }
 
     void read(const ggml_tensor * node) {
@@ -46,6 +47,10 @@ public:
         } else if (std::strcmp(name, "kqv-0") == 0) {
             v.read(node->src[0]);
             output.read(node);
+        } else if (std::strcmp(name, "Kcur-0") == 0) {
+            current_k.read(node);
+        } else if (std::strcmp(name, "Vcur-0") == 0) {
+            current_v.read(node);
         }
     }
 
@@ -54,8 +59,9 @@ public:
             return;
         }
         common_json manifest = {{"flash", flash}, {"scale", scale}};
-        for (const auto & item : std::array<std::pair<const char *, const tensor *>, 6>{{
+        for (const auto & item : std::array<std::pair<const char *, const tensor *>, 8>{{
                  {"q", &q}, {"k", &k}, {"v", &v}, {"mask", &mask}, {"attention_output", &output}, {"kv_rows", &rows},
+                 {"current_k", &current_k}, {"current_v", &current_v},
              }}) {
             if (!item.second->bytes.empty()) {
                 manifest[item.first] = item.second->save(directory, item.first);
@@ -115,7 +121,7 @@ private:
         }
     };
 
-    tensor q, k, v, mask, output, rows;
+    tensor q, k, v, mask, output, rows, current_k, current_v;
     float scale = 0;
     bool flash = false;
 };

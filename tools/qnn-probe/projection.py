@@ -68,7 +68,7 @@ def save_onnx_graph(graph, path, *, opset=21):
     onnx.save_model(model, path)
 
 
-def compare_output(actual, expected, *, full_ffn_htp=False):
+def compare_output(actual, expected, *, relative_limits=None):
     if actual.dtype != np.uint16 or actual.shape != expected.shape:
         raise RuntimeError(f"unexpected output: {actual.dtype}, {actual.shape}")
     actual_i32 = actual.astype(np.int32)
@@ -81,10 +81,9 @@ def compare_output(actual, expected, *, full_ffn_htp=False):
     relative_l2 = float(np.linalg.norm(error) / max(1, np.linalg.norm(signal)))
     relative_to_peak = max_error / max(1, int(np.abs(signal).max()))
     accuracy_passed = max_error <= MAX_ERROR_STEPS
-    if full_ffn_htp:
-        # Rounding and sigmoid approximation can accumulate across the complete FFN.
-        accuracy_passed = (relative_l2 <= FULL_FFN_MAX_RELATIVE_L2 and
-                           relative_to_peak <= FULL_FFN_MAX_ERROR_OF_PEAK)
+    if relative_limits:
+        # Rounding accumulates across multi-operator graphs.
+        accuracy_passed = relative_l2 <= relative_limits[0] and relative_to_peak <= relative_limits[1]
     return {
         "accuracy_passed": accuracy_passed,
         "relative_l2_error": relative_l2,
@@ -130,8 +129,8 @@ def benchmark(args):
         with np.load(args.replay / "input_and_reference.npz", allow_pickle=False) as fixture:
             if "replay_kind" in fixture:
                 kind = fixture["replay_kind"].item()
-            inputs = ({name: fixture[name] for name in ("Q", "K", "V", "attn_mask")} if kind == "attention"
-                      else {"x_u16": fixture["feed"]})
+            inputs = ({name: fixture[name] for name in fixture.files if name not in {"expected", "replay_kind"}}
+                      if "feed" not in fixture else {"x_u16": fixture["feed"]})
             expected = fixture["expected"]
     else:
         model = output / "verify_projection.onnx"
@@ -139,8 +138,14 @@ def benchmark(args):
         inputs = {"x_u16": feed}
     full_ffn = kind == "full-ffn"
     attention = kind == "attention"
+    layer = kind == "decoder-layer"
+    relative_limits = None
+    if attention or layer:
+        relative_limits = ATTENTION_MAX_RELATIVE_L2[args.backend], ATTENTION_MAX_ERROR_OF_PEAK[args.backend]
+    elif full_ffn and args.backend == "htp":
+        relative_limits = FULL_FFN_MAX_RELATIVE_L2, FULL_FFN_MAX_ERROR_OF_PEAK
     if args.attention_cpu_fp32:
-        if not attention or args.backend != "cpu":
+        if not (attention or layer) or args.backend != "cpu":
             raise ValueError("--attention-cpu-fp32 requires a CPU attention replay")
         model = args.replay / "attention_cpu_fp32.onnx"
     options = ort.SessionOptions()
@@ -179,9 +184,8 @@ def benchmark(args):
             raise RuntimeError(f"QNN provider was not selected: {session.get_providers()}")
 
         actual, = session.run(None, inputs, run_options)
-        full_ffn_htp = full_ffn and args.backend == "htp"
         compare_run = (partial(compare_attention_output, backend=args.backend) if attention else
-                       partial(compare_output, full_ffn_htp=full_ffn_htp))
+                       partial(compare_output, relative_limits=relative_limits))
         comparison = compare_run(actual, expected)
         independent_accuracy_passed = comparison["accuracy_passed"]
         if args.replay:
@@ -219,16 +223,14 @@ def benchmark(args):
             "weight_shape": WEIGHT_SHAPE if kind == "projection" else None,
             "weight_shapes": (WEIGHT_SHAPE, WEIGHT_SHAPE, WEIGHT_SHAPE[::-1]) if full_ffn else None,
             "replay_kind": kind,
-            "attention_model": model.name if attention else None,
+            "attention_model": model.name if attention or layer else None,
             "providers": session.get_providers(),
             "activation_code_multiplier": None if args.replay else multiplier,
             "cpu_comparison": cpu_comparison,
             "independent_accuracy_passed": independent_accuracy_passed,
-            "max_allowed_error_quantization_steps": None if full_ffn_htp or attention else MAX_ERROR_STEPS,
-            "max_allowed_relative_l2": (ATTENTION_MAX_RELATIVE_L2[args.backend] if attention else
-                                         FULL_FFN_MAX_RELATIVE_L2 if full_ffn_htp else None),
-            "max_allowed_error_of_peak": (ATTENTION_MAX_ERROR_OF_PEAK[args.backend] if attention else
-                                           FULL_FFN_MAX_ERROR_OF_PEAK if full_ffn_htp else None),
+            "max_allowed_error_quantization_steps": None if relative_limits else MAX_ERROR_STEPS,
+            "max_allowed_relative_l2": relative_limits[0] if relative_limits else None,
+            "max_allowed_error_of_peak": relative_limits[1] if relative_limits else None,
             **comparison,
             "session_init_ms": init_ms,
             "host_median_ms": float(np.median(elapsed_ms)) if elapsed_ms else None,

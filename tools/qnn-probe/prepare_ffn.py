@@ -63,6 +63,20 @@ def sigmoid(values):
     return 1 / (1 + np.exp(-values))
 
 
+def add_swiglu(graph, input_name, x_qdq, weights, output_name, *, output_tensor=False):
+    w_up, w_gate, w_down = weights
+    _, up = graph.activation("up", graph.project("up", input_name, x_qdq, w_up))
+    _, gate = graph.activation("gate", graph.project("gate", input_name, x_qdq, w_gate))
+    graph.node("Sigmoid", ["gate_dq"], "sigmoid")
+    _, probability = graph.activation("sigmoid", sigmoid(gate), sigmoid=True)
+    graph.node("Mul", ["gate_dq", "sigmoid_dq"], "silu")
+    _, silu = graph.activation("silu", gate * probability)
+    graph.node("Mul", ["silu_dq", "up_dq"], "swiglu")
+    _, swiglu = graph.activation("swiglu", silu * up)
+    return graph.activation(output_name, graph.project(output_name, "swiglu", swiglu, w_down),
+                            output_tensor=output_tensor)
+
+
 def prepare(capture, target, output):
     x, native = read_capture(capture, full_ffn=True)
     w_up, w_gate, w_down = load_weights(target, ["up", "gate", "down"])
@@ -71,15 +85,7 @@ def prepare(capture, target, output):
 
     graph = FfnGraph()
     feed, x_qdq = graph.activation("x", x, input_tensor=True)
-    _, up = graph.activation("up", graph.project("up", "x", x_qdq, w_up))
-    _, gate = graph.activation("gate", graph.project("gate", "x", x_qdq, w_gate))
-    graph.node("Sigmoid", ["gate_dq"], "sigmoid")
-    _, probability = graph.activation("sigmoid", sigmoid(gate), sigmoid=True)
-    graph.node("Mul", ["gate_dq", "sigmoid_dq"], "silu")
-    _, silu = graph.activation("silu", gate * probability)
-    graph.node("Mul", ["silu_dq", "up_dq"], "swiglu")
-    _, swiglu = graph.activation("swiglu", silu * up)
-    expected, dequantized = graph.activation("y", graph.project("y", "swiglu", swiglu, w_down), output_tensor=True)
+    expected, dequantized = add_swiglu(graph, "x", x_qdq, (w_up, w_gate, w_down), "y", output_tensor=True)
 
     output.mkdir(parents=True, exist_ok=False)
     graph.save(output / "verify_projection.onnx")

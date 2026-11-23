@@ -54,6 +54,8 @@ MacBook 负责开发、模型转换、数值对照和优先产包。骁龙笔记
 
 `5a1522a` 骁龙实测已通过完整 FFN。HTP 相对同图 CPU 的相对 L2 为 0.0354%，最大误差为参考峰值的 0.0125%，30 次热态主机往返中位数/P95 为 1.604/1.756 ms。下一次固定入口在一条转录里采集 FFN 和 attention，分别验证设备执行与数值。Attention 的图输入采用原生 post-RoPE Q、捕获的 KV 视图与显式因果掩码，定位 attention 算子及布局的精度。后续把投影、QK-Norm、RoPE、KV 增量与 FFN 接进同一 decoder 层，再验证完整 Target。
 
+`e935d5c` 骁龙实测已通过真实 post-RoPE attention。内部 FP32 的 CPU 对照通过，HTP 相对它的 L2 约 0.164%，30 次热态往返中位数约 1.08 ms。下一版固定入口运行一个从 post-RoPE 边界开始的整图，将新 K/V 拼接、attention、输出投影、残差、RMSNorm 与完整 FFN 放在同一 HTP 图内。真实回放失败时自动补跑两组已验收子图，单次运行输出定位所需结果。
+
 当前 Target 是 28 层、8 个 KV 头、K/V 头维均为 128，默认 FP16 KV 每个位置 112 KiB。完整 KV 在 2,048/8,192 位置分别约 224/896 MiB，每轮的八位置增量约 896 KiB。三层 FP16 aux 的八位置有效数据为 96 KiB。若回读全部八行 FP32 logits，还需约 4.64 MiB。上述为逻辑张量大小，实际拷贝量要按布局、分配与同步实测。连续解码应让 Target KV 常驻同一设备，首次做 prefill 和 KV 交接后只提交被接受的位置；单独计量跨设备 aux、logits 及必要的 KV 增量。
 
 优先通过 QNN EP 的 HTP 后端建立设备对照。并行评估 llama.cpp 的 Hexagon 路径能否复用现有 GGUF 图和取样逻辑。Windows 上该路径依赖受信任签名的 HTP 算子库，实机可用性按公司设备的软件审批状态验证。[llama.cpp Windows Hexagon 指南](https://github.com/ggml-org/llama.cpp/blob/e412c6f468b7b9e0f16f2540244236f8ad68e9ae/docs/backend/snapdragon/windows.md)

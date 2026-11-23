@@ -15,11 +15,11 @@ git switch --detach veri-1-auto-handoff
 .\scripts\win-arm64\update_and_verify.ps1
 ```
 
-本轮验证 **同一个真实八位置批次的 FFN 和 attention**。脚本同步 `veri/native-win-arm64`，复用现有模型和公开 `zh-plain-1.wav`，编译 ARM64 后端并在 Adreno 上采集第 0 层。FFN 使用逐输出通道 U8 权重、U16 激活。Attention 使用实际 post-RoPE query、缓存中的 K/V 和每个 query 的因果掩码，CPU 和 HTP 分别回放 FP16 分组注意力。两组都禁用 HTP 的 CPU fallback。首次构建可能需要几分钟。
+本轮验证 **第 0 层从 post-RoPE 开始的八位置整图**。脚本同步 `veri/native-win-arm64`，复用现有模型和公开 `zh-plain-1.wav`，在 Adreno 采集首个完整验证批次并核对新 K/V 与物理缓存位置。整图在固定容量内追加候选 K/V，执行 attention、输出投影、残差、FFN RMSNorm、完整 SwiGLU FFN 与最后的残差相加。整图失败时自动回跑已验收的 FFN 与 attention 子图以定位。HTP 禁用 CPU fallback。
 
-结束后拍回整段 **VOXT SNAPDRAGON REPORT**。两组都会输出误差、QAIRT 后端执行事件、进程状态和延迟。FFN 保留原有门槛。Attention 先检查每个 query 比前一个多看到一个 KV 位置，并与 Adreno 捕获输出核对。CPU 对独立参考的相对 L2 门槛为 0.25%，HTP 对通过的 CPU 与独立参考均为 0.5%，峰值误差门槛分别为参考峰值的 1% 和 2%。
+结束后拍回整段 **VOXT SNAPDRAGON REPORT**。整图需要 CPU 对独立参考的相对 L2 ≤0.25%，HTP 对通过的 CPU 与独立参考均 ≤0.5%，最大误差分别 ≤参考峰值的 1% 和 2%。报告同时给出混合精度重编码造成的误差、HTP 执行事件和主机往返耗时。单次回放使用已捕获的 K/V 和 post-RoPE 张量，跨轮提交与回滚进入后续验证。
 
-Attention CPU 首先回放 FP16 图并报告数值。若这组失败，自动用相同 FP16 输入输出、内部 FP32 计算的 CPU 图复核。两条 CPU 路径都失败时，HTP 仍与独立参考比较并保存执行证据，总体报告保留 CPU 对照未通过的状态。Attention 使用捕获后的只读 KV 视图，连续解码的 KV 提交与回滚进入后续验证。完整文件在 `Logs` 指向的目录内。
+CPU 首先回放原图，失败时仅将 attention 内部切换为 FP32 复核。两条 CPU 路径都失败时，HTP 仍与独立参考比较并保存执行证据，总体报告保留 CPU 对照未通过的状态。完整文件在 `Logs` 指向的目录内。
 
 ## Hexagon HTP 依赖
 

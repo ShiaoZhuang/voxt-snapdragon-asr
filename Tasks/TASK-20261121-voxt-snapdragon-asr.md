@@ -1,7 +1,7 @@
 # Voxt 骁龙 Windows ARM64 本地 ASR
 status: in-progress
 
-current_handoff: [HANDOFF-20261123-082036-voxt-snapdragon-asr.md](HANDOFF-20261123-082036-voxt-snapdragon-asr.md)
+current_handoff: [HANDOFF-20261123-083759-voxt-snapdragon-asr.md](HANDOFF-20261123-083759-voxt-snapdragon-asr.md)
 
 ## 目标与边界
 保留 Voxt 交互和协议，从干净上游构建 Qwen3-ASR 1.7B + DFlash。旧骁龙原型只提供性能现象参考。
@@ -28,10 +28,12 @@ current_handoff: [HANDOFF-20261123-082036-voxt-snapdragon-asr.md](HANDOFF-202611
 - [x] 捕获完整 FFN 输出，生成 up、gate、SwiGLU、down QDQ 图并完成 Mac 独立参考校验。
 - [x] 同一层 FFN 的完整子图在骁龙 HTP 上回放并实测误差与性能。
 - [x] 完成第 0 层 post-RoPE attention 的真实 KV 和原生掩码采集、独立参考和 Mac ORT 对照。
-- [ ] 骁龙 HTP 实测第 0 层 post-RoPE attention 和真实历史 KV 的误差、执行与耗时。
+- [x] 骁龙 HTP 实测第 0 层 post-RoPE attention 和真实历史 KV 的误差、执行与耗时。
+- [x] 将 KV 追加、post-RoPE attention、残差、归一化和完整 FFN 编入同一图并完成 Mac 数值对照。
+- [ ] 骁龙实测第 0 层 post-RoPE 整图的 HTP 精度、执行与耗时。
 - [ ] 完成 Hexagon Target 验证前向的实机可行性与性能报告。
 - [ ] 验收 Windows 桌面听写与实时接口。
 ## Current State
-FFN 骁龙复测通过，attention CPU 对照诊断和 FP32 复核已准备。
+骁龙 attention 实机通过，第 0 层 post-RoPE 整图回放已准备发布。
 ## 依赖与下一步
-骁龙结果依赖离线实机交接。下一步：骁龙本运行固定入口 update_and_verify.ps1，回传 attention 的 CPU 误差、FP32 复核结果及 QAIRT HTP 事件。
+骁龙结果依赖离线实机交接。下一步：骁龙本运行一次固定入口 update_and_verify.ps1，回传 decoder-layer 段和失败时自动输出的子图诊断。

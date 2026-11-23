@@ -38,6 +38,8 @@ public:
         input.clear();
         up.clear();
         output.clear();
+        residual.clear();
+        layer_output.clear();
         attention = {};
         active = true;
     }
@@ -55,6 +57,10 @@ public:
             write_tensor("ffn_norm.f32", input);
             write_tensor("ffn_up.f32", up);
             write_tensor("ffn_out.f32", output);
+            if (!residual.empty() && !layer_output.empty()) {
+                write_tensor("attention_residual.f32", residual);
+                write_tensor("layer_out.f32", layer_output);
+            }
             std::ofstream manifest(directory / "capture.json");
             manifest.exceptions(std::ios::failbit | std::ios::badbit);
             manifest << common_json({
@@ -82,6 +88,17 @@ private:
             return true;
         }
         if (self.active && tensor->type == GGML_TYPE_F32 && ggml_nrows(tensor) == positions && ggml_is_contiguous(tensor)) {
+            if (std::strcmp(ggml_get_name(tensor), "ffn_inp-0") == 0) {
+                const auto * residual = tensor->src[1];
+                if (residual && residual->type == GGML_TYPE_F32 && ggml_is_contiguous(residual) &&
+                    ggml_nelements(residual) == 2048 * positions) {
+                    if (!ask) {
+                        self.residual.resize(ggml_nelements(residual));
+                        ggml_backend_tensor_get(residual, self.residual.data(), 0, ggml_nbytes(residual));
+                    }
+                    return true;
+                }
+            }
             auto * data = select(self, tensor);
             if (data) {
                 if (!ask) {
@@ -105,6 +122,9 @@ private:
         if (tensor->ne[0] == 2048 && std::strcmp(name, "ffn_out-0") == 0) {
             return &self.output;
         }
+        if (tensor->ne[0] == 2048 && std::strcmp(name, "l_out-0") == 0) {
+            return &self.layer_output;
+        }
         return nullptr;
     }
 
@@ -119,6 +139,8 @@ private:
     std::vector<float> input;
     std::vector<float> up;
     std::vector<float> output;
+    std::vector<float> residual;
+    std::vector<float> layer_output;
     voxt_verify_attention_capture attention;
     bool active = false;
     bool saved = false;
