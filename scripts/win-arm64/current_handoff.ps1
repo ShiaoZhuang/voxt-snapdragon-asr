@@ -185,9 +185,30 @@ sys.exit(0 if platform == 'win-arm64' and sys.implementation.name == 'cpython' a
         $summary.Add("Decoder chain: $chain | HTP $($replay.htp_layers_passed)/$($replay.layer_count) | CPU $($replay.cpu_layers_passed)/$($replay.layer_count)")
         $summary.Add(('QAIRT executes: {0} | HTP layer medians summed: {1:F2} ms' -f
             $replay.htp_events, $replay.htp_layer_ms_sum))
+        $last = $replay.last_layer
+        $reference = $last.native_reference
+        if (!$reference) {
+            $lastReferencePath = Join-Path $targetDir 'last-layer-reference.json'
+            if (Test-Path -LiteralPath $lastReferencePath -PathType Leaf) {
+                $reference = Get-Content -Raw -LiteralPath $lastReferencePath | ConvertFrom-Json
+            }
+        }
+        if ($reference) {
+            $mode = if ($reference.boundary_capture) { 'per-stage' } else { 'whole-layer' }
+            $summary.Add(('Last layer native reference | dense L2 {0:P3} | gate: {1}' -f $reference.dense_output_l2, $mode))
+            $stages = foreach ($entry in ($reference.stage_l2.PSObject.Properties | Sort-Object Value -Descending | Select-Object -First 4)) {
+                '{0}={1:P3}' -f $entry.Name, $entry.Value
+            }
+            if ($stages) { $summary.Add("Last layer largest stage L2: $($stages -join ' | ')") }
+        }
+        if ($last.htp_isolated_vs_cpu) {
+            $summary.Add(('Last layer L2 | isolated HTP/CPU {0:P3} | isolated HTP/Adreno {1:P3} | chain HTP/Adreno {2:P3}' -f
+                $last.htp_isolated_vs_cpu.relative_l2_error, $last.htp_isolated_vs_native.relative_l2_error,
+                $last.htp_chain_vs_native.relative_l2_error))
+        }
         if ($replay.chain_complete) {
             $logits = $replay.logits
-            $summary.Add("Logits top-1 vs Adreno | native-hidden $($logits.native_hidden.matches)/8 | CPU $($logits.cpu_chain.matches)/8 | HTP $($logits.htp_chain.matches)/8")
+            $summary.Add("Logits top-1 vs Adreno | native-hidden $($logits.native_hidden.matches)/8 | CPU $($logits.cpu_chain.matches)/8 | HTP chain $($logits.htp_chain.matches)/8 | HTP last only $($logits.htp_isolated.matches)/8")
             $summary.Add(('HTP logits relative L2: {0:P3} | IDs: {1}' -f
                 $logits.htp_chain.relative_l2_error, ($logits.htp_chain.top1 -join ',')))
             if ($logits.htp_chain.matches -ne 8) { $summary.Add("Adreno IDs: $($replay.native_top1 -join ',')") }
@@ -197,12 +218,18 @@ sys.exit(0 if platform == 'win-arm64' and sys.implementation.name == 'cpython' a
             $summary.Add("DFlash auxiliary input relative L2: $($aux -join ' | ')")
         }
         if ($replay.failed_layers.Count) { $summary.Add("Failed layers (zero-indexed): $($replay.failed_layers -join ',')") }
+        foreach ($entry in ($replay.native_reference_failures.PSObject.Properties | Select-Object -First 2)) {
+            $summary.Add("Layer $($entry.Name) native reference failed: $($entry.Value -join ', ')")
+        }
         foreach ($entry in ($replay.errors.PSObject.Properties | Select-Object -First 2)) {
             $summary.Add("Layer $($entry.Name) error: $(($entry.Value -split '\r?\n')[0])")
         }
         if ($replay.passed -and $replay.backend -eq 'htp' -and $targetStep.Passed) {
             $summary.Add('Target replay: PASS')
             return
+        }
+        if ($replay.chain_complete) {
+            throw "Target replay completed but did not pass ($($targetStep.Status)). See $targetReport"
         }
     } else {
         foreach ($line in ($targetStep.Errors -split '\r?\n' | Where-Object { $_.Trim() } | Select-Object -Last 3)) {

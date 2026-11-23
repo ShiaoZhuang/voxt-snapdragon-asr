@@ -6,6 +6,7 @@
 #include "log.h"
 #include "verify_attention_capture.h"
 
+#include <algorithm>
 #include <array>
 #include <charconv>
 #include <cstdlib>
@@ -45,6 +46,9 @@ public:
         up.clear();
         output.clear();
         layers = {};
+        for (auto & boundary : last_layer_boundaries) {
+            boundary.data.clear();
+        }
         logits.clear();
         active = true;
     }
@@ -78,6 +82,13 @@ public:
                 write_tensor(folder / "layer_out.f32", layer.output);
                 if (!layer.attention.save(folder) && layer_count > 1) {
                     throw std::runtime_error("missing attention state at layer " + std::to_string(i));
+                }
+                if (i == target_layers - 1 &&
+                    std::all_of(last_layer_boundaries.begin(), last_layer_boundaries.end(),
+                                [](const auto & boundary) { return !boundary.data.empty(); })) {
+                    for (const auto & boundary : last_layer_boundaries) {
+                        write_tensor(folder / (std::string(boundary.name) + ".f32"), boundary.data);
+                    }
                 }
             }
             if (layer_count > 1) {
@@ -141,7 +152,10 @@ private:
             return true;
         }
         if (tensor->ne[0] == 2048 && name == "ffn_inp") {
-            return collect(tensor->src[1], layer.residual, ask);
+            const bool collected = collect(tensor->src[1], layer.residual, ask);
+            if (index != target_layers - 1) {
+                return collected;
+            }
         }
         if (tensor->ne[0] == 2048 && name == "l_out") {
             return collect(tensor, layer.output, ask);
@@ -154,6 +168,13 @@ private:
         }
         if (index == 0 && tensor->ne[0] == 2048 && name == "ffn_out") {
             return collect(tensor, self.output, ask);
+        }
+        if (index == target_layers - 1) {
+            for (auto & boundary : self.last_layer_boundaries) {
+                if (name == boundary.name && tensor->ne[0] == boundary.width) {
+                    return collect(tensor, boundary.data, ask);
+                }
+            }
         }
         return !ask;
     }
@@ -191,6 +212,15 @@ private:
         voxt_verify_attention_capture attention;
     };
     std::array<layer_capture, target_layers> layers;
+    struct named_boundary {
+        std::string_view name;
+        int width;
+        std::vector<float> data;
+    };
+    std::array<named_boundary, 6> last_layer_boundaries{{
+        {"ffn_inp", 2048, {}}, {"ffn_norm", 2048, {}}, {"ffn_up", 6144, {}},
+        {"ffn_gate", 6144, {}}, {"ffn_swiglu", 6144, {}}, {"ffn_out", 2048, {}},
+    }};
     std::vector<float> logits;
     int layer_count = 1;
     bool active = false;

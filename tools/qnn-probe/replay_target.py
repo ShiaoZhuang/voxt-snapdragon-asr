@@ -35,7 +35,7 @@ def compare_codes(actual, reference, backend):
     return {key: result[key] for key in ("relative_l2_error", "max_error_fraction_of_reference_peak", "accuracy_passed")}
 
 
-def run_htp(qnn, model, profile, feeds):
+def run_htp(qnn, model, profile, feeds, *, native_feeds=None):
     options, run_options, devices = htp_session_options(qnn, profile)
     session = ort.InferenceSession(str(model), sess_options=options, enable_fallback=False)
     try:
@@ -47,14 +47,27 @@ def run_htp(qnn, model, profile, feeds):
             start = time.perf_counter()
             output, = session.run(None, feeds, run_options)
             times.append((time.perf_counter() - start) * 1000)
-        return output, float(np.median(times)), htp_execute_events(session.end_profiling())
+        native_output = None
+        if native_feeds is not None:
+            native_output, = session.run(None, native_feeds, run_options)
+        return output, float(np.median(times)), htp_execute_events(session.end_profiling()), native_output
     finally:
         del session, options, devices
 
 
-def run_layer(capture, target, layer, directory, cpu_hidden, htp_hidden, qnn, profile):
+def run_layer(capture, target, layer, directory, cpu_hidden, htp_hidden, qnn, profile, *, final=False):
     feeds, expected, prep = prepare(
-        capture, target, directory, full=True, layer=layer, activation_code_limit=24576, verbose=False)
+        capture, target, directory, full=True, layer=layer, activation_code_limit=24576, verbose=False,
+        allow_reference_mismatch=True)
+    reference = {
+        "dense_output_l2": prep["dense_vs_native_capture"]["relative_l2_error"],
+        "stage_l2": {name: value["relative_l2_error"] for name, value in
+                     {**prep["dense_qkv_vs_native"], **prep["native_boundaries"]}.items()},
+        "boundary_capture": bool(prep["native_boundaries"]),
+        "failed_checks": prep["failed_native_checks"],
+    }
+    if final:
+        (profile.parent / "last-layer-reference.json").write_text(json.dumps(reference, indent=2) + "\n", encoding="utf-8")
     native = load_hidden(capture / "layer_out.f32")
     # Graphs use the same code range on both backends. Keep headroom for chained states.
     scale = prep["output_scale"]
@@ -69,19 +82,22 @@ def run_layer(capture, target, layer, directory, cpu_hidden, htp_hidden, qnn, pr
         cpu_codes, = session.run(None, {**feeds, "residual": cpu_hidden})
     next_cpu = hidden_from_codes(cpu_codes, scale)
     result = {
+        "native_reference": reference,
         "cpu_vs_independent": cpu_check,
         "cpu_chain_vs_native": compare(next_cpu, native),
         "cpu_output_clipped": bool(np.any((cpu_codes == 0) | (cpu_codes == 65535))),
     }
     if not qnn:
-        return next_cpu, None, result
+        return next_cpu, None, None, result
 
     htp_feeds = feeds
     cpu_pair = captured_codes
     if htp_hidden is not None:
         htp_feeds = {**feeds, "residual": htp_hidden}
         cpu_pair, = session.run(None, htp_feeds)
-    htp_codes, median, events = run_htp(qnn, directory / "verify_projection.onnx", profile, htp_feeds)
+    htp_codes, median, events, native_codes = run_htp(
+        qnn, directory / "verify_projection.onnx", profile, htp_feeds,
+        native_feeds=feeds if final and htp_hidden is not None else None)
     next_htp = hidden_from_codes(htp_codes, scale)
     result.update({
         "htp_vs_cpu_same_input": compare_codes(htp_codes, cpu_pair, "htp"),
@@ -90,7 +106,15 @@ def run_layer(capture, target, layer, directory, cpu_hidden, htp_hidden, qnn, pr
         "host_median_ms": median,
         "qaairt_execute_events": events,
     })
-    return next_cpu, next_htp, result
+    isolated_htp = None
+    if final:
+        native_codes = htp_codes if native_codes is None else native_codes
+        isolated_htp = hidden_from_codes(native_codes, scale)
+        result["htp_isolated_vs_native"] = compare(isolated_htp, native)
+        result["htp_isolated_vs_cpu"] = compare_codes(native_codes, captured_codes, "htp")
+        result["passed_isolated_htp"] = (result["htp_isolated_vs_cpu"]["accuracy_passed"] and
+                                         not np.any((native_codes == 0) | (native_codes == 65535)))
+    return next_cpu, next_htp, isolated_htp, result
 
 
 def read_head(target, columns):
@@ -144,7 +168,7 @@ def run(args, qnn):
 
     checked = []
     aux = {}
-    cpu_hidden = htp_hidden = native_output = None
+    cpu_hidden = htp_hidden = native_output = isolated_htp = None
     connected = True
     passing = True
     with (args.output / "target-layers.jsonl").open("w", encoding="utf-8", buffering=1) as log:
@@ -161,14 +185,16 @@ def run(args, qnn):
                     if htp_hidden is not None:
                         aux[layer]["htp_chain_vs_native"] = compare(htp_hidden, native_input)
                 with TemporaryDirectory(prefix=f"layer-{layer}-", dir=args.output) as temporary:
-                    cpu_hidden, htp_hidden, metrics = run_layer(
+                    cpu_hidden, htp_hidden, isolated_htp, metrics = run_layer(
                         folder, target, layer, Path(temporary) / "fixture", cpu_hidden, htp_hidden, qnn,
-                        args.output / f"htp-layer-{layer}")
+                        args.output / f"htp-layer-{layer}", final=layer == layer_count - 1)
                 result.update(metrics)
-                result["passed"] = metrics["cpu_vs_independent"]["accuracy_passed"] and not metrics["cpu_output_clipped"]
+                result["passed"] = (metrics["cpu_vs_independent"]["accuracy_passed"] and
+                                    not metrics["cpu_output_clipped"] and not metrics["native_reference"]["failed_checks"])
                 if qnn:
                     result["passed"] &= (metrics["htp_vs_cpu_same_input"]["accuracy_passed"] and
-                                         metrics["qaairt_execute_events"] > 0 and not metrics["htp_output_clipped"])
+                                         metrics["qaairt_execute_events"] > 0 and not metrics["htp_output_clipped"] and
+                                         metrics.get("passed_isolated_htp", True))
             except Exception as error:
                 # Continue from the next native snapshot so one broken layer cannot hide later ones.
                 result.update(passed=False, error=f"{type(error).__name__}: {error}")
@@ -186,6 +212,9 @@ def run(args, qnn):
                                  and info.get("qaairt_execute_events", 0) > 0 for info in checked) if qnn else None,
         "failed_layers": [info["layer"] for info in checked if not info["passed"]],
         "errors": {info["layer"]: info["error"] for info in checked if "error" in info},
+        "native_reference_failures": {info["layer"]: info["native_reference"]["failed_checks"] for info in checked
+                                      if info.get("native_reference", {}).get("failed_checks")},
+        "last_layer": checked[-1],
         "htp_layer_ms_sum": sum(info.get("host_median_ms", 0) for info in checked) if qnn else None,
         "htp_events": sum(info.get("qaairt_execute_events", 0) for info in checked) if qnn else None,
         "aux": aux,
@@ -195,8 +224,10 @@ def run(args, qnn):
         states = {"native_hidden": native_output, "cpu_chain": cpu_hidden}
         if qnn:
             states["htp_chain"] = htp_hidden
+            states["htp_isolated"] = isolated_htp
         report["native_top1"], report["logits"] = score_logits(target, native_logits, states)
-        passing &= all(result["matches"] == INPUT_SHAPE[0] for result in report["logits"].values())
+        passing &= all(result["matches"] == INPUT_SHAPE[0] for name, result in report["logits"].items()
+                       if name != "htp_isolated")
         passing &= len(aux) == len(aux_layers)
     report["passed"] = passing and connected
     (args.output / "target_replay.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")

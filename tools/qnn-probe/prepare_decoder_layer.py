@@ -14,6 +14,9 @@ from prepare_ffn import FfnGraph, add_swiglu, sigmoid
 from projection import save_onnx_graph
 
 
+MAX_NATIVE_STAGE_L2 = 0.03
+
+
 def read_tensor(capture, manifest, name):
     info = manifest[name]
     return np.fromfile(capture / info["file"], dtype=info["dtype"]).reshape(info["shape"])
@@ -56,6 +59,33 @@ def read_weight(tensors, layer, name, shape, *, quantized=False):
 
 def normalize(x, weight, epsilon):
     return x * (1 / np.sqrt(np.mean(x * x, axis=-1, keepdims=True) + epsilon)) * weight
+
+
+def native_boundaries(capture, residual, native, attention, projected, norm, epsilon, ffn):
+    """Check each native operation with its actual inputs, independent of upstream drift."""
+    def read(name, width=2048):
+        values = np.fromfile(capture / f"{name}.f32", dtype="<f4").reshape(8, width)
+        if not np.isfinite(values).all():
+            raise ValueError(f"nonfinite native boundary: {name}")
+        return values
+
+    ffn_in, ffn_norm, down = (read(name) for name in ("ffn_inp", "ffn_norm", "ffn_out"))
+    up, gate, swiglu = (read(name, 6144) for name in ("ffn_up", "ffn_gate", "ffn_swiglu"))
+    w_up, w_gate, w_down = ffn
+    boundaries = {
+        "attention": compare(attention[0], attention[1]),
+        # ggml can reuse the projection buffer for the addition; recover the contribution from both captured states.
+        "attention_output_projection": compare(projected, ffn_in.astype(np.float64) - residual),
+        "ffn_norm": compare(normalize(ffn_in, norm, epsilon), ffn_norm),
+        "ffn_up": compare(ffn_norm @ w_up.T, up),
+        "ffn_gate": compare(ffn_norm @ w_gate.T, gate),
+        "ffn_swiglu": compare(gate * sigmoid(gate) * up, swiglu),
+        "ffn_down": compare(swiglu @ w_down.T, down),
+    }
+    boundaries["output_residual"] = compare(ffn_in + down, native)
+    if boundaries["output_residual"]["relative_l2_error"] > 1e-5:
+        raise ValueError(f"inconsistent native capture at output residual: {boundaries['output_residual']}")
+    return boundaries
 
 
 def rotary_tables(capture, manifest):
@@ -178,7 +208,8 @@ def build_graph(feeds, weights, norm, epsilon, scale, *, front=None, fp32_attent
     return model, expected, dequantized, float(graph.initializers["y_scale"])
 
 
-def prepare(capture, target, output, *, full=False, layer=0, activation_code_limit=32000, verbose=True):
+def prepare(capture, target, output, *, full=False, layer=0, activation_code_limit=32000, verbose=True,
+            allow_reference_mismatch=False):
     q, k, v, mask, native_attention, scale, counts = load_attention(capture)
     residual = np.fromfile(capture / "attention_residual.f32", dtype="<f4").reshape(8, 2048)
     native = np.fromfile(capture / "layer_out.f32", dtype="<f4").reshape(8, 2048)
@@ -196,6 +227,7 @@ def prepare(capture, target, output, *, full=False, layer=0, activation_code_lim
 
     front = None
     front_errors = {}
+    dense_attention = native_attention
     if full:
         qkv_weights = tuple(read_weight(tensors, layer, f"attn_{name}", (2048, width), quantized=True)
                             for name, width in (("q", 2048), ("k", 1024), ("v", 1024)))
@@ -205,17 +237,28 @@ def prepare(capture, target, output, *, full=False, layer=0, activation_code_lim
         rebuilt = project_qkv(None, residual, *front)
         front_errors = {name: compare(rebuilt[name], feeds.pop(name).astype(np.float32))
                         for name in ("Q", "K", "V")}
-        if max(error["relative_l2_error"] for error in front_errors.values()) > 0.03:
-            raise ValueError(f"dense Q/K/V reconstruction exceeds 3% relative L2: {front_errors}")
         dense_k = np.concatenate((feeds["past_key"], rebuilt["K"]), axis=2)
         dense_v = np.concatenate((feeds["past_value"], rebuilt["V"]), axis=2)
-        native_attention = attention_reference(rebuilt["Q"], dense_k, dense_v, feeds["attn_mask"], scale).astype(np.float32)
+        dense_attention = attention_reference(rebuilt["Q"], dense_k, dense_v, feeds["attn_mask"], scale).astype(np.float32)
 
-    dense_residual = residual + native_attention.swapaxes(1, 2).reshape(8, 2048) @ output_weight.T
+    dense_residual = residual + dense_attention.swapaxes(1, 2).reshape(8, 2048) @ output_weight.T
     normed = normalize(dense_residual, norm, epsilon)
     w_up, w_gate, w_down = ffn_weights
     gate = normed @ w_gate.T
     dense = dense_residual + (gate * sigmoid(gate) * (normed @ w_up.T)) @ w_down.T
+    dense_gap = compare(dense, native)
+    boundaries = {}
+    if (capture / "ffn_inp.f32").exists():
+        attn_from_native = attention_reference(q, k, v, mask, scale)
+        attn_projection = native_attention.swapaxes(1, 2).reshape(8, 2048) @ output_weight.T
+        boundaries = native_boundaries(capture, residual, native, (attn_from_native, native_attention),
+                                       attn_projection, norm, epsilon, ffn_weights)
+    reference_checks = {**front_errors, **(boundaries or {"dense_output": dense_gap})}
+    failed_checks = [name for name, metrics in reference_checks.items()
+                     if not metrics["relative_l2_error"] <= MAX_NATIVE_STAGE_L2]
+    if failed_checks and not allow_reference_mismatch:
+        details = ", ".join(f"{name}={reference_checks[name]['relative_l2_error']:.3%}" for name in failed_checks)
+        raise ValueError(f"Native reconstruction exceeds {MAX_NATIVE_STAGE_L2:.0%} relative L2: {details}")
 
     weights = (output_weight, ffn_weights)
     model, expected, dequantized, output_scale = build_graph(
@@ -228,20 +271,20 @@ def prepare(capture, target, output, *, full=False, layer=0, activation_code_lim
     kind = "full-decoder" if full else "decoder-layer"
     np.savez(output / "input_and_reference.npz", **feeds, expected=expected, replay_kind=kind)
     report = {
-        "dense_vs_native_capture": compare(dense, native),
+        "dense_vs_native_capture": dense_gap,
         "mixed_precision_vs_dense": compare(dequantized, dense),
         "mixed_precision_vs_native_capture": compare(dequantized, native),
         "history_tokens": history, "staged_tokens": 8, "cache_columns": int(k.shape[2]),
         "visible_keys_per_query": counts,
         "dense_qkv_vs_native": front_errors,
+        "native_boundaries": boundaries,
+        "failed_native_checks": failed_checks,
         "output_scale": output_scale,
     }
     text = json.dumps(report, indent=2) + "\n"
     (output / "preparation.json").write_text(text, encoding="utf-8")
     if verbose:
         print(text, end="")
-    if report["dense_vs_native_capture"]["relative_l2_error"] > 0.03:
-        raise ValueError("dense reconstruction differs from native layer output by more than 3% L2")
     return feeds, expected, report
 
 
