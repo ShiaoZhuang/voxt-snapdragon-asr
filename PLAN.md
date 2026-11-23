@@ -52,6 +52,8 @@ MacBook 负责开发、模型转换、数值对照和优先产包。骁龙笔记
 
 `162597b` 已在骁龙通过真实第 0 层 FFN up 投影。逐通道 A16/U8 重编码相对 dense Q8_0 的 L2 误差为 0.7759%，HTP 相对同图 CPU 的最大误差为 1 步。30 次热态主机往返中位数/P95 为 1.381/1.820 ms。下一轮用同一形状的真实批次验证 `up/gate → SwiGLU → down` 整个子图，分别报告重新编码和 HTP 执行的误差。attention、KV、logits 和整轮延迟进入后续验证。
 
+`5a1522a` 骁龙实测已通过完整 FFN。HTP 相对同图 CPU 的相对 L2 为 0.0354%，最大误差为参考峰值的 0.0125%，30 次热态主机往返中位数/P95 为 1.604/1.756 ms。下一次固定入口在一条转录里采集 FFN 和 attention，分别验证设备执行与数值。Attention 的图输入采用原生 post-RoPE Q、捕获的 KV 视图与显式因果掩码，定位 attention 算子及布局的精度。后续把投影、QK-Norm、RoPE、KV 增量与 FFN 接进同一 decoder 层，再验证完整 Target。
+
 当前 Target 是 28 层、8 个 KV 头、K/V 头维均为 128，默认 FP16 KV 每个位置 112 KiB。完整 KV 在 2,048/8,192 位置分别约 224/896 MiB，每轮的八位置增量约 896 KiB。三层 FP16 aux 的八位置有效数据为 96 KiB。若回读全部八行 FP32 logits，还需约 4.64 MiB。上述为逻辑张量大小，实际拷贝量要按布局、分配与同步实测。连续解码应让 Target KV 常驻同一设备，首次做 prefill 和 KV 交接后只提交被接受的位置；单独计量跨设备 aux、logits 及必要的 KV 增量。
 
 优先通过 QNN EP 的 HTP 后端建立设备对照。并行评估 llama.cpp 的 Hexagon 路径能否复用现有 GGUF 图和取样逻辑。Windows 上该路径依赖受信任签名的 HTP 算子库，实机可用性按公司设备的软件审批状态验证。[llama.cpp Windows Hexagon 指南](https://github.com/ggml-org/llama.cpp/blob/e412c6f468b7b9e0f16f2540244236f8ad68e9ae/docs/backend/snapdragon/windows.md)
@@ -60,7 +62,7 @@ MacBook 负责开发、模型转换、数值对照和优先产包。骁龙笔记
 2. **再接连续解码。** 先固定 Draft 与 prefill 的设备，替换 Target 验证这一项。明确 KV 由哪一侧持有，单列首次 prefill KV 转移、每轮 KV 增量、候选、aux 与输出的搬运字节和同步时间。验证设备跟踪能证明 Target 图确实在 HTP 上执行。涉及精度变化时，额外跑对应精度的参考对照。
 3. **用整条链路做决策。** 对相同 31 条数据比较纯 GPU 与混合方案的质量、接收长度、热态端到端耗时，以及可测时的能耗，纯 CPU 使用已冻结的对照数据。满足质量门槛且计入传输后有可重复收益，再启用混合路径作为默认配置。若受算子、驱动、KV 布局或传输限制，交付实际失败位置、已跑通的上下文长度及对照数据，保留可用的 GPU/CPU 路径。
 
-真实投影的开发入口是 `VOXT_VERIFY_CAPTURE_DIR`。为本地诊断进程指定一个尚未创建的目录，运行单槽 Q4 DFlash 对 `zh-plain-1.wav` 的转录。后端只在首个完整八位置验证批次写出第 0 层 FFN norm、up 投影、完整 FFN 的末端输出、token 与位置。用 `tools/qnn-probe/prepare_ffn.py --capture <DIR> --target <GGUF> --output <DIR>` 本地构造完整子图和独立参考。捕获与模型均留在本地。完整验证链路的吞吐测试关闭采集。
+真实回放的开发入口是 `VOXT_VERIFY_CAPTURE_DIR`。为本地诊断进程指定一个尚未创建的目录，运行单槽 Q4 DFlash 对 `zh-plain-1.wav` 的转录。后端只采集首个完整八位置验证批次的第 0 层 FFN 与 attention 张量。`tools/qnn-probe/prepare_ffn.py --capture <DIR> --target <GGUF> --output <DIR>` 生成 FFN 子图，`tools/qnn-probe/prepare_attention.py --capture <DIR> --output <DIR>` 生成 attention 子图。捕获与模型均留在本地。完整验证链路的吞吐测试关闭采集。
 
 ## 4. 公开 GitHub 仓库与实机交接
 

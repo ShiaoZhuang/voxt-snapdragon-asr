@@ -8,7 +8,7 @@ import numpy as np
 from onnx import TensorProto, helper, numpy_helper
 
 from compare_capture import compare, load_weights, read_capture, symmetric_codes
-from projection import save_qdq_graph
+from projection import save_onnx_graph
 
 
 class FfnGraph:
@@ -56,7 +56,7 @@ class FfnGraph:
             [helper.make_tensor_value_info("y_u16", TensorProto.UINT16, shape)],
             [numpy_helper.from_array(value, name) for name, value in self.initializers.items()],
         )
-        save_qdq_graph(graph, path)
+        save_onnx_graph(graph, path)
 
 
 def sigmoid(values):

@@ -4,6 +4,7 @@
 #include "ggml-backend.h"
 #include "json.h"
 #include "log.h"
+#include "verify_attention_capture.h"
 
 #include <array>
 #include <cstdlib>
@@ -37,6 +38,7 @@ public:
         input.clear();
         up.clear();
         output.clear();
+        attention = {};
         active = true;
     }
 
@@ -64,6 +66,7 @@ public:
                 {"ffn_output_shape", common_json::array({positions, 2048})},
             }).dump(2) << '\n';
             manifest.close();
+            attention.save(directory);
         } catch (const std::exception & error) {
             LOG_ERR("Voxt verification capture: %s\n", error.what());
         }
@@ -72,6 +75,12 @@ public:
 private:
     static bool eval(ggml_tensor * tensor, bool ask, void * user_data) {
         auto & self = *static_cast<voxt_verify_capture *>(user_data);
+        if (self.active && self.attention.wants(tensor)) {
+            if (!ask) {
+                self.attention.read(tensor);
+            }
+            return true;
+        }
         if (self.active && tensor->type == GGML_TYPE_F32 && ggml_nrows(tensor) == positions && ggml_is_contiguous(tensor)) {
             auto * data = select(self, tensor);
             if (data) {
@@ -110,6 +119,7 @@ private:
     std::vector<float> input;
     std::vector<float> up;
     std::vector<float> output;
+    voxt_verify_attention_capture attention;
     bool active = false;
     bool saved = false;
 };

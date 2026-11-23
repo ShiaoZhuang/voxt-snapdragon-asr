@@ -15,9 +15,9 @@ git switch --detach veri-1-auto-handoff
 .\scripts\win-arm64\update_and_verify.ps1
 ```
 
-本轮验证 **真实 DFlash 八位置完整 FFN 回放**。脚本同步最新的 `veri/native-win-arm64`，复用已安装的模型和公开 `zh-plain-1.wav`，在骁龙本上编译 ARM64 后端并用 Adreno 捕获首个完整验证批次。随后从原 `target.gguf` 读取第 0 层 FFN 权重，用逐输出通道 U8 权重、U16 激活生成 `up/gate → SwiGLU → down` 子图。CPU 和 Hexagon HTP 回放同一个子图，输入来自 FFN norm 的输出。首次构建可能需要几分钟，期间可在 `Live logs` 目录查看日志。
+本轮验证 **同一个真实八位置批次的 FFN 和 attention**。脚本同步 `veri/native-win-arm64`，复用现有模型和公开 `zh-plain-1.wav`，编译 ARM64 后端并在 Adreno 上采集第 0 层。FFN 使用逐输出通道 U8 权重、U16 激活。Attention 使用实际 post-RoPE query、缓存中的 K/V 和每个 query 的因果掩码，CPU 和 HTP 分别回放 FP16 分组注意力。两组都禁用 HTP 的 CPU fallback。首次构建可能需要几分钟。
 
-结束后拍回整段 **VOXT SNAPDRAGON REPORT**。摘要包含真实批次位置、重新编码误差、同一 QDQ 图的 HTP 与 CPU 差异、QAIRT 后端执行事件和延迟。通过要求捕获与 DFlash token 日志一致，CPU 与独立参考的最大误差在 2 步内。完整 FFN 的 HTP 输出与 CPU 及独立参考均需满足相对 L2 ≤0.1%、最大误差 ≤参考输出峰值的 0.5%，并且实测有 QAIRT 后端执行事件、进程正常退出。报告也保留最大/P95 量化步长和超过 2 步的输出数。完整文件在 `Logs` 指向的目录内，量化 scale 由这次的捕获样本确定。
+结束后拍回整段 **VOXT SNAPDRAGON REPORT**。两组都会输出误差、QAIRT 后端执行事件、进程状态和延迟，任一组失败时仍会继续另一组。FFN 保留原有门槛。Attention 先检查每个 query 比前一个多看到一个 KV 位置，并与 Adreno 捕获输出核对。CPU 对独立 FP16 参考的相对 L2 门槛为 0.25%，HTP 对同图 CPU 与独立参考均为 0.5%，峰值误差门槛分别为参考峰值的 1% 和 2%。Attention 的缓存来自捕获后的只读视图，连续解码的 KV 提交与回滚另有后续门槛。完整文件在 `Logs` 指向的目录内。
 
 ## Hexagon HTP 依赖
 

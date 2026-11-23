@@ -1,15 +1,18 @@
-"""Probe a fixed eight-position Qwen3-ASR FFN projection shape through QNN HTP."""
+"""Replay fixed eight-position Qwen3-ASR FFN and attention graphs through QNN HTP."""
 
 import argparse
 import json
 import platform
 import time
+from functools import partial
 from pathlib import Path
 
 import numpy as np
 import onnx
 import onnxruntime as ort
 from onnx import TensorProto, helper, numpy_helper
+
+from compare_capture import compare
 
 
 INPUT_SHAPE = (8, 2048)
@@ -18,6 +21,8 @@ QNN_PROVIDER = "QNNExecutionProvider"
 MAX_ERROR_STEPS = 2
 FULL_FFN_MAX_RELATIVE_L2 = 0.001
 FULL_FFN_MAX_ERROR_OF_PEAK = 0.005
+ATTENTION_MAX_RELATIVE_L2 = {"cpu": 0.0025, "htp": 0.005}
+ATTENTION_MAX_ERROR_OF_PEAK = {"cpu": 0.01, "htp": 0.02}
 
 
 def make_fixture(path, activation_multiplier=1):
@@ -54,11 +59,11 @@ def write_projection(path, initializers):
         [helper.make_tensor_value_info("y_u16", TensorProto.UINT16, (INPUT_SHAPE[0], WEIGHT_SHAPE[1]))],
         [numpy_helper.from_array(value, name) for name, value in initializers.items()],
     )
-    save_qdq_graph(graph, path)
+    save_onnx_graph(graph, path)
 
 
-def save_qdq_graph(graph, path):
-    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 21)], ir_version=10)
+def save_onnx_graph(graph, path, *, opset=21):
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", opset)], ir_version=10)
     onnx.checker.check_model(model, full_check=True)
     onnx.save_model(model, path)
 
@@ -98,20 +103,42 @@ def compare_output(actual, expected, *, full_ffn_htp=False):
     }
 
 
+def compare_attention_output(actual, expected, *, backend):
+    if actual.shape != expected.shape or actual.dtype != np.float16 or not np.isfinite(actual).all():
+        raise RuntimeError(f"invalid attention output: {actual.dtype}, {actual.shape}")
+    peak = float(np.abs(expected).max())
+    if not np.isfinite(expected).all() or peak == 0:
+        raise RuntimeError("invalid attention reference")
+    comparison = compare(actual, expected.astype(np.float32))
+    max_error_of_peak = comparison["max_abs_error"] / peak
+    return {
+        **comparison,
+        "max_error_fraction_of_reference_peak": max_error_of_peak,
+        "accuracy_passed": (comparison["relative_l2_error"] <= ATTENTION_MAX_RELATIVE_L2[backend] and
+                            max_error_of_peak <= ATTENTION_MAX_ERROR_OF_PEAK[backend]),
+    }
+
+
 def benchmark(args):
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
     # Use more of A16's code range while keeping the exact same real-valued input.
     multiplier = 4096 if args.variant == "wide-a16" else 1
-    full_ffn = False
+    kind = "projection"
     if args.replay:
         model = args.replay / "verify_projection.onnx"
         with np.load(args.replay / "input_and_reference.npz", allow_pickle=False) as fixture:
-            feed, expected = fixture["feed"], fixture["expected"]
-            full_ffn = "replay_kind" in fixture and fixture["replay_kind"].item() == "full-ffn"
+            if "replay_kind" in fixture:
+                kind = fixture["replay_kind"].item()
+            inputs = ({name: fixture[name] for name in ("Q", "K", "V", "attn_mask")} if kind == "attention"
+                      else {"x_u16": fixture["feed"]})
+            expected = fixture["expected"]
     else:
         model = output / "verify_projection.onnx"
         feed, expected = make_fixture(model, multiplier)
+        inputs = {"x_u16": feed}
+    full_ffn = kind == "full-ffn"
+    attention = kind == "attention"
     options = ort.SessionOptions()
     run_options = ort.RunOptions()
     qnn_version = None
@@ -147,16 +174,17 @@ def benchmark(args):
         if args.backend == "htp" and QNN_PROVIDER not in session.get_providers():
             raise RuntimeError(f"QNN provider was not selected: {session.get_providers()}")
 
-        inputs = {"x_u16": feed}
         actual, = session.run(None, inputs, run_options)
         full_ffn_htp = full_ffn and args.backend == "htp"
-        comparison = compare_output(actual, expected, full_ffn_htp=full_ffn_htp)
+        compare_run = (partial(compare_attention_output, backend=args.backend) if attention else
+                       partial(compare_output, full_ffn_htp=full_ffn_htp))
+        comparison = compare_run(actual, expected)
         if args.replay:
-            np.save(output / "actual_u16.npy", actual, allow_pickle=False)
+            np.save(output / ("actual_f16.npy" if attention else "actual_u16.npy"), actual, allow_pickle=False)
         cpu_comparison = None
         if args.cpu_output:
             cpu_output = np.load(args.cpu_output, allow_pickle=False)
-            cpu_comparison = compare_output(actual, cpu_output, full_ffn_htp=full_ffn_htp)
+            cpu_comparison = compare_run(actual, cpu_output)
             comparison["accuracy_passed"] &= cpu_comparison["accuracy_passed"]
         elapsed_ms = []
         if comparison["accuracy_passed"]:
@@ -181,17 +209,19 @@ def benchmark(args):
             "variant": args.variant,
             "onnxruntime": ort.__version__,
             "onnxruntime_qnn": qnn_version,
-            "input_shape": feed.shape,
+            "input_shape": next(iter(inputs.values())).shape,
             "output_shape": actual.shape,
-            "weight_shape": None if full_ffn else WEIGHT_SHAPE,
+            "weight_shape": WEIGHT_SHAPE if kind == "projection" else None,
             "weight_shapes": (WEIGHT_SHAPE, WEIGHT_SHAPE, WEIGHT_SHAPE[::-1]) if full_ffn else None,
-            "replay_kind": "full-ffn" if full_ffn else "projection",
+            "replay_kind": kind,
             "providers": session.get_providers(),
             "activation_code_multiplier": None if args.replay else multiplier,
             "cpu_comparison": cpu_comparison,
-            "max_allowed_error_quantization_steps": None if full_ffn_htp else MAX_ERROR_STEPS,
-            "max_allowed_relative_l2": FULL_FFN_MAX_RELATIVE_L2 if full_ffn_htp else None,
-            "max_allowed_error_of_peak": FULL_FFN_MAX_ERROR_OF_PEAK if full_ffn_htp else None,
+            "max_allowed_error_quantization_steps": None if full_ffn_htp or attention else MAX_ERROR_STEPS,
+            "max_allowed_relative_l2": (ATTENTION_MAX_RELATIVE_L2[args.backend] if attention else
+                                         FULL_FFN_MAX_RELATIVE_L2 if full_ffn_htp else None),
+            "max_allowed_error_of_peak": (ATTENTION_MAX_ERROR_OF_PEAK[args.backend] if attention else
+                                           FULL_FFN_MAX_ERROR_OF_PEAK if full_ffn_htp else None),
             **comparison,
             "session_init_ms": init_ms,
             "host_median_ms": float(np.median(elapsed_ms)) if elapsed_ms else None,

@@ -4,7 +4,6 @@ import argparse
 import json
 from pathlib import Path
 
-import gguf
 import numpy as np
 
 
@@ -27,6 +26,8 @@ def read_capture(directory, *, full_ffn=False):
 
 
 def load_weights(target, names):
+    import gguf
+
     reader = gguf.GGUFReader(target)
     available = {tensor.name: tensor for tensor in reader.tensors}
     for name in names:
