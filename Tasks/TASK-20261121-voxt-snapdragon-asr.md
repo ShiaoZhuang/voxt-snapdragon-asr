@@ -1,7 +1,7 @@
 # Voxt 骁龙 Windows ARM64 本地 ASR
 status: in-progress
 
-current_handoff: [HANDOFF-20261122-233636-voxt-snapdragon-asr.md](HANDOFF-20261122-233636-voxt-snapdragon-asr.md)
+current_handoff: [HANDOFF-20261123-015905-voxt-snapdragon-asr.md](HANDOFF-20261123-015905-voxt-snapdragon-asr.md)
 
 ## 目标与边界
 保留 Voxt 交互和协议，从干净上游构建 Qwen3-ASR 1.7B + DFlash。旧骁龙原型只提供性能现象参考。
@@ -17,11 +17,13 @@ current_handoff: [HANDOFF-20261122-233636-voxt-snapdragon-asr.md](HANDOFF-202611
 - [x] 骁龙本固定入口完成 Git 同步、验证任务调用和屏幕报告输出。
 - [x] 修复 Adreno OpenCL Target 启动，骁龙本完成纯 Target 单条转录。
 - [x] 验证 Adreno OpenCL 的 Q4 DFlash 单条接收和 Target-only 逐 token 一致性。
-- [ ] 获取 Oryon/Adreno 四组 31 条实机结果，满足质量与接收门槛。
+- [x] 获取 Oryon/Adreno 四组 31 条实机结果，满足质量与接收门槛。
 - [ ] 移植自适应投机回退，并基于骁龙结果测延迟。
+- [x] 完成固定八位置 QNN 投影探针的 CPU 数值对照。
+- [ ] 骁龙实机确认 QNN 投影在 HTP 执行并记录 profiling。
 - [ ] 完成 Hexagon Target 验证前向的实机可行性与性能报告。
 - [ ] 验收 Windows 桌面听写与实时接口。
 ## Current State
-Adreno Q4 DFlash 单条实机通过，逐 token 一致，下一轮为 Voxt 31 条全量。
+OpenCL-only 全量复验通过，固定入口切到 Hexagon HTP 投影探针。
 ## 依赖与下一步
-骁龙结果依赖离线实机交接。下一步：骁龙本准备公司批准的 Go 1.27.1+，重跑固定入口并回传四组全量摘要
+骁龙结果依赖离线实机交接。下一步：用获准的 QNN ARM64 Python 依赖运行固定入口，回传 HTP 事件及投影数值和延迟

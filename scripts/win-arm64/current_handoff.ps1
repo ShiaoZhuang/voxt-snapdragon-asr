@@ -8,59 +8,64 @@ param(
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 $summary = [System.Collections.Generic.List[string]]::new()
-$summary.Add('Test: Voxt 31 clips | Adreno OpenCL | Target-only + Q4 DFlash')
-$stage = 'local assets'
+$summary.Add('Test: Hexagon HTP | 8 x 2048 by 2048 x 6144 QDQ projection')
+$stage = 'Python runtime'
 try {
-    if (!(Test-Path -LiteralPath (Join-Path $InstallDirectory 'verify_manifest.json') -PathType Leaf)) {
-        throw "Missing installed Veri 1 manifest at $InstallDirectory"
+    # The fixed launcher starts this workflow from the user's checkout.
+    $python = Join-Path (Get-Location).Path '.local/qnn-probe-venv/Scripts/python.exe'
+    if (!(Test-Path -LiteralPath $python -PathType Leaf)) {
+        $python = (Get-Command python -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1).Source
     }
+    if (!$python) { throw 'Windows ARM64 Python 3.11-3.14 is required. See Handoff.MD.' }
+    $summary.Add("Python: $python")
 
-    $stage = 'native build'
-    & (Join-Path $PSScriptRoot 'build_native.ps1') -BuildDirectory $BuildDirectory
-    $summary.Add('Native backend and benchmark build: PASS')
+    $stage = 'QNN HTP projection'
+    $source = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '../..')).Path
+    $probe = Join-Path $source 'tools/qnn-probe/projection.py'
+    $output = Join-Path $LogDirectory 'qnn-probe'
+    $start = [Diagnostics.ProcessStartInfo]::new($python)
+    $start.WorkingDirectory = $source
+    $start.Arguments = '-X utf8 "' + $probe + '" --backend htp --output "' + $output + '"'
+    $start.UseShellExecute = $false
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    $start.StandardOutputEncoding = [Text.Encoding]::UTF8
+    $start.StandardErrorEncoding = [Text.Encoding]::UTF8
+    $child = [Diagnostics.Process]::Start($start)
+    try {
+        $stdout = $child.StandardOutput.ReadToEndAsync()
+        $stderr = $child.StandardError.ReadToEndAsync()
+        $finished = $child.WaitForExit(180000)
+        if (!$finished) { $child.Kill(); $child.WaitForExit() }
+        [IO.File]::WriteAllText((Join-Path $LogDirectory 'qnn.stdout.log'), $stdout.GetAwaiter().GetResult())
+        $errors = $stderr.GetAwaiter().GetResult()
+        [IO.File]::WriteAllText((Join-Path $LogDirectory 'qnn.stderr.log'), $errors)
+        $status = $child.ExitCode
+    } finally { $child.Dispose() }
 
-    $stage = 'Voxt benchmark'
-    $results = Join-Path $LogDirectory 'verification'
-    & (Join-Path $PSScriptRoot 'run_verify.ps1') -OpenCLOnly -NativeBuildDirectory $BuildDirectory `
-        -InstallDirectory $InstallDirectory -OutputDirectory $results
-    $stats = Get-Content -Raw -LiteralPath (Join-Path $results 'verify_stats.json') | ConvertFrom-Json
-    $report = Join-Path $results 'verify_report.md'
-    foreach ($line in @(Get-Content -Encoding UTF8 -LiteralPath $report | Where-Object { $_ -match '^(Preflight failed:|Device query failed:|  GPUOpenCL:)' })) {
-        $summary.Add($line.Trim())
-    }
-
-    foreach ($name in @('opencl-target-only', 'opencl-draft-q4')) {
-        $run = $stats.runs.$name
-        if (!$run) { continue }
-        if ($run.error) {
-            $summary.Add("${name}: FAIL | $($run.error)")
-            if ($run.diagnostic) { $summary.Add("  $($run.diagnostic)") }
-            continue
+    if (!$finished -or $status -ne 0) {
+        foreach ($line in @($errors -split '\r?\n' | Where-Object { $_.Trim() } | Select-Object -Last 4)) {
+            $summary.Add($line.Trim())
         }
-        $m = $run.metrics
-        $total = $run.aggregate
-        $label = if ($run.passed) { 'PASS' } else { 'FAIL' }
-        $summary.Add(('{0}: {1} | {2} clips | error {3:P2} | dict {4}/10 | wall sum {5:F1} s' -f
-            $name, $label, $m.clips, $m.error_rate, $m.dictionary_hits, ($total.elapsed_ms / 1000)))
-        if ($name -like '*draft*') {
-            $summary.Add(('  avg_accept {0:F2} | avg_step {1:F2} | rate {2:P1} | clean {3:F2}' -f
-                $m.avg_accept, $m.avg_step, $m.accept_rate, $m.clean_avg_accept))
-            if ($null -ne $m.greedy_token_mismatches) {
-                $summary.Add("  Token mismatches: $($m.greedy_token_mismatches.Count) $($m.greedy_token_mismatches -join ', ')".TrimEnd())
-            }
-            $summary.Add(('  zh-plain {0:P2} | en {1:P2} | long {2:P2}' -f
-                $m.sets.'zh-plain', $m.sets.en, $m.sets.long))
-            $timed = $total.draft_ms + $total.target_ms + $total.context_ms
-            if ($timed -gt 0 -and $total.rounds -gt 0) {
-                $summary.Add(('  ms/round: Draft {0:F2} ({1:P1}) | Target {2:F2} ({3:P1}) | Context {4:F2} ({5:P1})' -f
-                    ($total.draft_ms / $total.rounds), ($total.draft_ms / $timed),
-                    ($total.target_ms / $total.rounds), ($total.target_ms / $timed),
-                    ($total.context_ms / $total.rounds), ($total.context_ms / $timed)))
-            } else { $summary.Add('  DFlash profiling unavailable.') }
+        if ($errors -match 'ModuleNotFoundError') {
+            $summary.Add('Use the approved ARM64 Python packages in tools/qnn-probe/requirements-win-arm64.txt.')
         }
+        if (!$finished) { throw 'QNN projection timed out after 180 seconds.' }
+        throw "QNN projection exited with code $status."
     }
+
+    $report = Join-Path $output 'projection_probe.json'
+    $result = Get-Content -Raw -LiteralPath $report | ConvertFrom-Json
+    if ($result.backend -ne 'htp' -or $result.qnn_backend_execute_events -lt 1 -or
+        $result.providers -notcontains 'QNNExecutionProvider') {
+        throw 'QNN projection did not provide HTP execution evidence.'
+    }
+    $summary.Add("ONNX Runtime $($result.onnxruntime) | QNN EP $($result.onnxruntime_qnn)")
+    $summary.Add("QAIRT backend execute events: $($result.qnn_backend_execute_events)")
+    $summary.Add("Maximum output error: $($result.max_error_quantization_steps) quantization steps")
+    $summary.Add(('Host round trip ms (median/p95): {0:F3} / {1:F3} | {2} runs' -f
+        $result.host_median_ms, $result.host_p95_ms, $result.timed_runs))
     $summary.Add("Full report: $report")
-    if (!$stats.passed) { throw 'One or more Voxt benchmark gates failed.' }
 } catch {
     $summary.Add("Failed step: $stage")
     $summary.Add("Error: $($_.Exception.Message)")

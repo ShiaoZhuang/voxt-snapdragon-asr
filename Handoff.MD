@@ -15,9 +15,20 @@ git switch --detach veri-1-auto-handoff
 .\scripts\win-arm64\update_and_verify.ps1
 ```
 
-启动脚本从本仓库的 `veri/native-win-arm64` 分支同步最新提交到专用工作目录，再运行该提交指定的验证任务。当前任务是 Adreno OpenCL 的 Target-only 与 Q4 DFlash 各跑 Voxt 31 条。CPU 基线沿用 `veri-1-windows-full` 的结果。脚本使用本机已安装的 Go 1.27.1+ 编译 Voxt 评测器，复用已有模型和评测音频。如果模型在自定义目录，运行时加 `-InstallDirectory`。[Go 官方下载](https://go.dev/dl/)
+启动脚本从本仓库的 `veri/native-win-arm64` 分支同步最新提交到专用工作目录，再运行该提交指定的验证任务。本轮只验证 Hexagon HTP 的八位置 QDQ 投影。脚本在本机生成小型合成图，输出数值误差、延迟及 ORT 中的 QAIRT backend execute 事件。
 
 结束后拍屏幕上的 **VOXT SNAPDRAGON REPORT** 整段，包含提交、通过状态、关键错误和日志位置。完整输出、探针报告和文本摘要保存在 `Logs:` 指向的目录。
+
+## Hexagon HTP 一次性准备
+
+已有包含 ONNX Runtime QNN 的获准 ARM64 Python 环境时，可直接跑固定脚本。如需准备，在仓库根目录用获准的 Windows ARM64 Python 3.11–3.14 创建此项目的虚拟环境。通过公司允许的 Python 软件源获取下列已固定版本的包。[QNN EP v2.8.0 安装说明](https://github.com/onnxruntime/onnxruntime-qnn/tree/v2.8.0#install)
+
+```powershell
+python -m venv .\.local\qnn-probe-venv
+.\.local\qnn-probe-venv\Scripts\python.exe -m pip install --only-binary=:all: onnx==1.22.0 onnxruntime==1.29.0 onnxruntime-qnn==2.8.0
+```
+
+跑固定入口时，脚本优先使用该环境。探针包含一个独立的整数参考校验，目标是确认 QNN 在 HTP 上实际执行一种与 ASR Target 同尺寸的投影，为真实权重和 KV 回放建立运行时基线。
 
 ## 骁龙本从源码构建与验收
 
