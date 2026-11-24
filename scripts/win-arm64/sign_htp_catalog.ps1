@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string]$PackageDirectory,
+    [Parameter(Mandatory)][string]$TrialDirectory,
     [Parameter(Mandatory)][AllowEmptyCollection()][System.Collections.Generic.List[string]]$Summary
 )
 
@@ -8,7 +9,7 @@ $ErrorActionPreference = 'Stop'
 $package = (Resolve-Path -LiteralPath $PackageDirectory).Path
 $catalogName = 'libggml-htp.cat'
 $catalog = Join-Path $package $catalogName
-if (Test-Path -LiteralPath $catalog -PathType Leaf) { return }
+if (Test-Path -LiteralPath $catalog -PathType Leaf) { return $package }
 
 function Invoke-SigningTool([string]$Tool, [string[]]$Arguments, [int]$TimeoutSeconds) {
     $start = [Diagnostics.ProcessStartInfo]::new($Tool)
@@ -62,9 +63,8 @@ $candidates = @(foreach ($store in @('CurrentUser', 'LocalMachine')) {
         $Summary.Add("HTP certificate store $store/My unavailable | $($_.Exception.Message)")
     }
 })
-if (!$candidates.Count) {
-    if ($thumbprint) { throw 'The requested certificate is unavailable or lacks a valid code-signing key.' }
-    throw 'No valid code-signing certificate with a private key found in CurrentUser/My or LocalMachine/My.'
+if (!$candidates.Count -and $thumbprint) {
+    throw 'The requested certificate is unavailable or lacks a valid code-signing key.'
 }
 
 $kitBins = @($env:WINDOWS_SDK_BIN, $env:WindowsSdkVerBinPath) | Where-Object { $_ }
@@ -84,6 +84,7 @@ $windowsBuild = [int](Get-ItemPropertyValue 'HKLM:\SOFTWARE\Microsoft\Windows NT
 $os = if ($windowsBuild -ge 26200) { '10_25H2_ARM64' } elseif ($windowsBuild -ge 26100) { '10_GE_ARM64' } else { '10_NI_ARM64' }
 
 $stage = (New-Item -ItemType Directory -Path (Join-Path $package ('.signing-' + [guid]::NewGuid()))).FullName
+$trialCert = $null
 try {
     $dspName = 'libggml-htp-v73.so'
     $infName = 'libggml-htp.inf'
@@ -95,6 +96,15 @@ try {
     $stagedCatalog = Join-Path $stage $catalogName
     $unsignedCatalog = Join-Path $stage 'unsigned.cat'
     Move-Item -LiteralPath $stagedCatalog -Destination $unsignedCatalog
+
+    if (!$candidates.Count) {
+        Write-Host '[voxt] Creating a temporary self-signed certificate for the v73 load test.'
+        $trialCert = New-SelfSignedCertificate -Type CodeSigningCert -CertStoreLocation 'Cert:\CurrentUser\My' `
+            -Subject "CN=Voxt HTP v73 test $([guid]::NewGuid())" -KeyExportPolicy NonExportable `
+            -HashAlgorithm SHA256 -NotAfter ((Get-Date).AddDays(1))
+        $candidates = @([pscustomobject]@{ Store = 'CurrentUser'; Thumbprint = $trialCert.Thumbprint })
+        $Summary.Add("HTP signing mode: temporary self-signed | $($trialCert.Thumbprint)")
+    }
 
     $signingBudget = [Diagnostics.Stopwatch]::StartNew()
     $failures = @()
@@ -121,7 +131,20 @@ try {
     } else {
         $Summary.Add("SignTool verify: exit $($result.Code) | $($result.Detail) | Testing the normal HTP loader.")
     }
+    if ($trialCert) {
+        $trial = (New-Item -ItemType Directory -Path $TrialDirectory).FullName
+        Copy-Item -LiteralPath (Join-Path $stage $dspName), (Join-Path $stage $infName), $stagedCatalog -Destination $trial
+        return $trial
+    }
     [IO.File]::Move($stagedCatalog, $catalog)
+    return $package
 } finally {
     Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
+    if ($trialCert) {
+        try {
+            Remove-Item -LiteralPath "Cert:\CurrentUser\My\$($trialCert.Thumbprint)" -DeleteKey -Force
+        } catch {
+            $Summary.Add("Temporary HTP key cleanup failed | $($_.Exception.Message)")
+        }
+    }
 }
