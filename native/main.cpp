@@ -4,6 +4,7 @@
 #include "ggml-backend.h"
 #include "server-context.h"
 #include "server-http.h"
+#include "verify_ffn_down.h"
 
 #include <atomic>
 #include <cstdlib>
@@ -36,6 +37,9 @@ static std::string model_file(const std::string & directory, const std::string &
 }
 
 static int run(const std::vector<std::string> & arguments) {
+    if (arguments.size() == 5 && arguments[1] == "--verify-ffn-down") {
+        return voxt_verify_ffn_down(fs::u8path(arguments[2]), arguments[3], arguments[4]);
+    }
     if (arguments.size() == 2 && arguments[1] == "--help") {
         std::cout << "qwen3_asr_server --supervised --host 127.0.0.1 --port 0 "
                      "--model-directory DIR [--draft-model-path DIR --draft-bits 4|6|8] "

@@ -15,15 +15,19 @@ git switch --detach veri-1-auto-handoff
 .\scripts\win-arm64\update_and_verify.ps1
 ```
 
-脚本同步 `veri/native-win-arm64`，用已安装的工具链在骁龙本编译一次。从公开 `zh-plain-1.wav` 转录中采集一个真实的八位置验证批次，保存全部 28 层的原生边界、历史 K/V 和 logits。
+这轮默认只比较第 27 层的 `ffn_down`。脚本同步 `veri/native-win-arm64` 并本机编译，优先复用此前已保存的公开样本八位置采集。缺少完整采集时会自动重做单条 Adreno 转录。
 
-同一次运行把 28 个独立的 HTP 层会话串起来，上一层的隐藏输出作为下一层输入。每层使用采集的 Adreno 历史 K/V，在 HTP 上计算当前八位置的 K/V 和隐藏输出。CPU 运行小批次 QDQ 数值对照。禁用 HTP 的 CPU fallback，各层都检查 QAIRT 执行记录。最后用主机上的原 Q8_0 词表投影比较八个位置的 logits、top-1 token，以及 DFlash 消费的三处辅助隐藏输入。
+同一份真实 SwiGLU 输入和原 Q8_0 权重分别走 Adreno 八行、四行和逐行矩阵乘法。另加从同一权重解量化的 Adreno FP32 投影、独立主机 FP32 对照和 HTP QDQ 投影。报告比较各路径的 L2 与替换该投影后八个位置的 top-1。诊断回放不上整模型 HTP 链。仍按 3% 记录原捕获参考是否超限，超限时报告保留各路径结果。结束后拍最后的 **VOXT SNAPDRAGON REPORT** 即可。
+
+## 完整 Target 回放
+
+内部工作脚本 `current_handoff.ps1` 的 `-FullReplay` 模式仍可运行完整回放。流程从公开 `zh-plain-1.wav` 捕获真实八位置验证批次，串起 28 个独立 HTP 层会话，把上一层的隐藏输出传给下一层。每层复用 Adreno 采集的历史 K/V，计算当前八位置的 K/V 与隐藏输出。CPU 运行小批次 QDQ 数值对照。HTP 禁用 CPU fallback，各层都检查 QAIRT 执行记录。最后用主机原 Q8_0 词表投影比较 logits、top-1 和 DFlash 三处辅助输入。
 
 每层需要 CPU 对独立参考的相对 L2 ≤0.25%，HTP 对同输入 CPU 的相对 L2 ≤0.5%，最大误差分别 ≤参考峰值的 1% 和 2%。整批次还需要八个 top-1 全部匹配。第 27 层保存 attention 残差相加前后的状态和 FFN 各阶段。原生重建沿用 3% 相对 L2 门槛，在有完整采集时逐阶段以原生输入检查，同时报告累计误差。若原生重建超出门槛，脚本继续采集 HTP 和 logits 结果，并把超限项标为失败。
 
 先用原生输入单测第 27 层，再运行串联回放。每层 HTP 使用独立进程，最多等待 45 秒。若一层无法执行，后续层用下一份原生激活继续诊断，同时保留已有结果。串联验证的启动预算为 270 秒，整段回放由 360 秒保护。报告在超时时标出最后记录的阶段及已保存的层数，日志保留单层 QNN 初始化、执行、profiling 和清理阶段。
 
-结束后拍回整段 **VOXT SNAPDRAGON REPORT**。各层中位数之和由每层三次热态运行得出。端到端时间、原生 KV 跨轮提交和连续转录属于下一阶段。每层数据和完整结果留在 `Logs` 指向的 `target-replay` 目录。
+各层中位数之和由每层三次热态运行得出。端到端时间、原生 KV 跨轮提交和连续转录属于下一阶段。每层数据和完整结果留在 `Logs` 指向的 `target-replay` 目录。
 
 ## Hexagon HTP 依赖
 

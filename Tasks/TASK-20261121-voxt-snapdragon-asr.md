@@ -1,7 +1,7 @@
 # Voxt 骁龙 Windows ARM64 本地 ASR
 status: in-progress
 
-current_handoff: [HANDOFF-20261123-110612-voxt-snapdragon-asr.md](HANDOFF-20261123-110612-voxt-snapdragon-asr.md)
+current_handoff: [HANDOFF-20261123-185906-voxt-snapdragon-asr.md](HANDOFF-20261123-185906-voxt-snapdragon-asr.md)
 
 ## 目标与边界
 保留 Voxt 交互和协议，从干净上游构建 Qwen3-ASR 1.7B + DFlash。旧骁龙原型只提供性能现象参考。
@@ -37,10 +37,11 @@ current_handoff: [HANDOFF-20261123-110612-voxt-snapdragon-asr.md](HANDOFF-202611
 - [x] 骁龙前 27 层 HTP 串联通过，末层原生重建超限。
 - [x] 末层原生逐阶段检查与独立 HTP 回放并入固定入口，验证超限时仍可采集 logits。
 - [x] 末层优先单测，按层隔离 QNN 进程并保留超时前的数据和阶段。
-- [ ] 验收骁龙 28 层 HTP 串联回放、DFlash 辅助张量与最终 logits。
+- [x] 骁龙实测已完成 28 层 HTP 串联、DFlash 辅助张量和八位置 top-1。
+- [ ] 解决末层原生 FFN down 偏差，并复核原生参考门槛。
 - [ ] 完成 Hexagon Target 验证前向的实机可行性与性能报告。
 - [ ] 验收 Windows 桌面听写与实时接口。
 ## Current State
-整链超时已记录，末层优先和单层超时保护已就绪。
+28 层 HTP 实机串联完成，末层 FFN down 定点对照已就绪。
 ## 依赖与下一步
-骁龙结果依赖离线实机交接。下一步：骁龙固定入口运行一次，查看末层独立结果、若超时的具体阶段及 28 层串联、top-1 汇总。
+骁龙结果依赖离线实机交接。下一步：骁龙固定入口运行末层投影对照一次，取得 Q8 八行、四行、逐行、FP32 与 HTP 对同一输入的结果。

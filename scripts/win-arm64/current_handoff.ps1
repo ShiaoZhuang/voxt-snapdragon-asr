@@ -2,13 +2,15 @@
 param(
     [Parameter(Mandatory)][string]$InstallDirectory,
     [Parameter(Mandatory)][string]$BuildDirectory,
-    [Parameter(Mandatory)][string]$LogDirectory
+    [Parameter(Mandatory)][string]$LogDirectory,
+    [switch]$FullReplay
 )
 
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 $summary = [System.Collections.Generic.List[string]]::new()
-$summary.Add('Test: 28-layer Target HTP replay | eight positions | DFlash aux and logits')
+if ($FullReplay) { $summary.Add('Test: 28-layer Target HTP replay | eight positions | DFlash aux and logits') }
+else { $summary.Add('Test: final-layer FFN down | identical SwiGLU input | Adreno and HTP') }
 $source = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '../..')).Path
 
 function Invoke-QnnStep([string]$Exe, [string[]]$Arguments, [string]$Name, [int]$TimeoutSeconds, [switch]$Probe) {
@@ -16,7 +18,7 @@ function Invoke-QnnStep([string]$Exe, [string[]]$Arguments, [string]$Name, [int]
     $start.WorkingDirectory = $source
     $start.Arguments = ($Arguments | ForEach-Object { '"' + ($_ -replace '(\\+)$', '$1$1') + '"' }) -join ' '
     $start.EnvironmentVariables['PYTHON_MANAGER_AUTOMATIC_INSTALL'] = 'false'
-    if ($Name -eq 'target-replay') {
+    if ($Name -in @('target-replay', 'ffn-down-probe')) {
         $start.EnvironmentVariables['OPENBLAS_NUM_THREADS'] = '4'
     }
     $start.UseShellExecute = $false
@@ -170,22 +172,77 @@ sys.exit(0 if platform == 'win-arm64' and sys.implementation.name == 'cpython' a
     $summary.Add('Native ARM64 backend build: PASS')
 
     $stage = 'Adreno DFlash capture'
-    $capture = Join-Path $LogDirectory 'verify-capture'
-    $captureLog = Join-Path $LogDirectory 'adreno-capture.txt'
-    & (Join-Path $PSScriptRoot 'probe_opencl_startup.ps1') -InstallDirectory $InstallDirectory `
-        -NativeBuildDirectory $BuildDirectory -Transcribe -Draft -CaptureDirectory $capture -CaptureAllLayers -ReportPath $captureLog | Out-Host
-    $captureDetails = Get-Content -Encoding UTF8 -LiteralPath $captureLog
-    foreach ($line in ($captureDetails -match '^(Capture:|Capture layers:|Transcription probe:|Exit code:|Startup probe error:)')) {
-        $summary.Add($line)
+    $capture = $null
+    if (!$FullReplay) {
+        foreach ($run in (Get-ChildItem -LiteralPath (Split-Path -Parent $LogDirectory) -Directory | Sort-Object Name -Descending)) {
+            $candidate = Join-Path $run.FullName 'verify-capture'
+            $missing = @('capture.json', 'target_logits.f32', 'layer-27/ffn_swiglu.f32', 'layer-27/ffn_inp.f32',
+                         'layer-27/ffn_out.f32', 'layer-27/layer_out.f32') | Where-Object {
+                !(Test-Path -LiteralPath (Join-Path $candidate $_) -PathType Leaf)
+            }
+            if (!$missing) {
+                $capture = $candidate
+                $summary.Add("Capture: reused $($run.Name)")
+                break
+            }
+        }
     }
-    if (!($captureDetails -match '^Capture: PASS') -or !($captureDetails -match '^Transcription probe: PASS$') -or
-        !($captureDetails -match '^Exit code: 0 \(0x00000000\)$')) {
-        throw "Adreno DFlash capture did not complete. See $captureLog"
+    if (!$capture) {
+        $capture = Join-Path $LogDirectory 'verify-capture'
+        $captureLog = Join-Path $LogDirectory 'adreno-capture.txt'
+        & (Join-Path $PSScriptRoot 'probe_opencl_startup.ps1') -InstallDirectory $InstallDirectory `
+            -NativeBuildDirectory $BuildDirectory -Transcribe -Draft -CaptureDirectory $capture -CaptureAllLayers -ReportPath $captureLog | Out-Host
+        $captureDetails = Get-Content -Encoding UTF8 -LiteralPath $captureLog
+        foreach ($line in ($captureDetails -match '^(Capture:|Capture layers:|Transcription probe:|Exit code:|Startup probe error:)')) {
+            $summary.Add($line)
+        }
+        if (!($captureDetails -match '^Capture: PASS') -or !($captureDetails -match '^Transcription probe: PASS$') -or
+            !($captureDetails -match '^Exit code: 0 \(0x00000000\)$')) {
+            throw "Adreno DFlash capture did not complete. See $captureLog"
+        }
+    }
+
+    $toolsDir = Join-Path $source 'tools/qnn-probe'
+    $target = Join-Path $InstallDirectory 'models/target.gguf'
+    if (!$FullReplay) {
+        $stage = 'Final-layer FFN down'
+        $output = Join-Path $LogDirectory 'ffn-down-probe'
+        $step = Invoke-QnnStep $python @('-X', 'utf8', (Join-Path $toolsDir 'probe_ffn_down.py'), '--capture', $capture,
+            '--target', $target, '--server', (Join-Path $BuildDirectory 'bin/qwen3_asr_server.exe'),
+            '--output', $output) 'ffn-down-probe' 210 -Probe
+        $reportPath = Join-Path $output 'ffn_down_report.json'
+        if (!(Test-Path -LiteralPath $reportPath -PathType Leaf)) {
+            foreach ($line in ($step.Errors -split '\r?\n' | Where-Object { $_.Trim() } | Select-Object -Last 2)) {
+                $summary.Add($line.Trim())
+            }
+            throw "No FFN down report ($($step.Status))."
+        }
+        $probe = Get-Content -Raw -LiteralPath $reportPath | ConvertFrom-Json
+        $summary.Add(('FP32 vs captured down L2: {0:P3} | FP16 input rounding alone: {1:P3}' -f
+            $probe.dense_vs_captured.relative_l2_error, $probe.fp16_input_vs_dense.relative_l2_error))
+        foreach ($variant in $probe.variants.PSObject.Properties) {
+            $value = $variant.Value
+            if ($value.error) { $summary.Add("$($variant.Name): $($value.error)"); continue }
+            $summary.Add(('{0} | vs FP32 L2 {1:P3} | vs captured L2 {2:P3}' -f
+                $variant.Name, $value.vs_dense.relative_l2_error, $value.vs_captured.relative_l2_error))
+        }
+        if ($probe.htp.htp_vs_qdq_reference) {
+            $summary.Add(('HTP | vs QDQ L2 {0:P3} | vs FP32 L2 {1:P3} | QAIRT executes {2}' -f
+                $probe.htp.htp_vs_qdq_reference.relative_l2_error, $probe.htp.vs_dense.relative_l2_error, $probe.htp.qaairt_execute_events))
+        }
+        if ($probe.htp.error) { $summary.Add("HTP error: $($probe.htp.error)") }
+        if ($probe.logits) {
+            $matches = foreach ($entry in $probe.logits.PSObject.Properties) { "$($entry.Name)=$($entry.Value.matches)/8" }
+            $summary.Add("Top-1 vs captured logits | $($matches -join ' | ')")
+            $candidates = if ($probe.matching_native_variants) { $probe.matching_native_variants -join ', ' } else { 'none' }
+            $summary.Add("Native variants within 3% and 8/8: $candidates")
+        }
+        if ($step.Passed -and $probe.passed) { $summary.Add('FFN down probe: PASS'); return }
+        $summary.Add("FFN down probe stage: $($probe.last_stage) | $($step.Status)")
+        throw "FFN down gate remains unresolved. See $reportPath"
     }
 
     $stage = 'Target replay'
-    $toolsDir = Join-Path $source 'tools/qnn-probe'
-    $target = Join-Path $InstallDirectory 'models/target.gguf'
     $draft = Join-Path $InstallDirectory 'models/draft-4.gguf'
     $targetDir = Join-Path $LogDirectory 'target-replay'
     $previous = Get-ChildItem -LiteralPath (Split-Path -Parent $LogDirectory) -Directory |
