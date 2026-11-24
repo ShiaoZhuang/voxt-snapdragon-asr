@@ -83,16 +83,43 @@ function Invoke-BuildTool([string]$Tool, [string[]]$Arguments) {
     if ($LASTEXITCODE -ne 0) { throw "$Tool failed (exit $LASTEXITCODE): $($Arguments -join ' ')" }
 }
 
-function Get-PinnedSource([string]$Name, [string]$Repo, [string]$Revision) {
+function Test-AppliedPatch([string]$Path, [string]$Patch) {
+    # A failed check is an expected cache miss, including on Windows PowerShell.
+    $ErrorActionPreference = 'Continue'
+    & git -C $Path -c core.autocrlf=false apply --reverse --check $Patch 2>&1 | Out-Null
+    return $LASTEXITCODE -eq 0
+}
+
+function Get-PinnedSource([string]$Name, [string]$Repo, [string]$Revision, [string]$Patch) {
     $path = Join-Path $build "src/$Name-$($Revision.Substring(0,12))"
-    if (!(Test-Path -LiteralPath $path)) {
+    $exists = Test-Path -LiteralPath $path
+    $needsPatch = $exists -and $Patch -and !(Test-AppliedPatch $path $Patch)
+    if (!$exists -or $needsPatch) {
         $stage = "$path-$([guid]::NewGuid())"
+        $backup = $null
         try {
+            if ($needsPatch) {
+                Write-Host "Rebuilding incomplete patched source cache: $Name"
+            }
             Invoke-BuildTool git @('-c', 'core.longpaths=true', 'init', '-q', $stage) | Out-Host
             Invoke-BuildTool git @('-C', $stage, 'fetch', '--depth=1', '--no-tags', $Repo, $Revision) | Out-Host
             Invoke-BuildTool git @('-C', $stage, '-c', 'core.autocrlf=false', '-c', 'core.longpaths=true', 'checkout', '--detach', 'FETCH_HEAD') | Out-Host
             if ((Invoke-BuildTool git @('-C', $stage, 'rev-parse', 'HEAD')) -ne $Revision) { throw "Unexpected revision for $Name" }
-            Move-Item -LiteralPath $stage -Destination $path
+            if ($Patch) {
+                # Always apply forward on the fresh checkout. Git status can
+                # report changes unrelated to patching, such as line endings.
+                Invoke-BuildTool git @('-C', $stage, '-c', 'core.autocrlf=false', 'apply', '--whitespace=nowarn', $Patch)
+            }
+            if ($needsPatch) {
+                $backup = "$path.incomplete-$([guid]::NewGuid())"
+                [IO.Directory]::Move($path, $backup)
+            }
+            [IO.Directory]::Move($stage, $path)
+        } catch {
+            if ($backup -and (Test-Path -LiteralPath $backup) -and !(Test-Path -LiteralPath $path)) {
+                [IO.Directory]::Move($backup, $path)
+            }
+            throw
         } finally {
             if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
         }
@@ -143,21 +170,14 @@ $llamaRevision = $lock.llama_cpp.commit
 $llamaRepo = $lock.llama_cpp.repo
 $revisionId = $llamaRevision.Substring(0,12)
 $sourceRoot = Join-Path $build 'src'
-if (!(Test-Path -LiteralPath (Join-Path $sourceRoot "llama-$patchId-$revisionId"))) {
-    $cached = Get-ChildItem -LiteralPath $sourceRoot -Filter "llama-*-$revisionId" -Directory |
-        Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName '.git') -PathType Container } | Select-Object -First 1
-    if ($cached -and (Invoke-BuildTool git @('-C', $cached.FullName, 'rev-parse', 'HEAD')) -eq $llamaRevision) {
-        $llamaRepo = $cached.FullName
-        Write-Host "Reusing cached llama.cpp source at $llamaRepo"
-    }
+$cached = Get-ChildItem -LiteralPath $sourceRoot -Filter "llama-*-$revisionId" -Directory |
+    Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName '.git') -PathType Container } | Select-Object -First 1
+if ($cached -and (Invoke-BuildTool git @('-C', $cached.FullName, 'rev-parse', 'HEAD')) -eq $llamaRevision) {
+    $llamaRepo = $cached.FullName
+    Write-Host "Reusing cached llama.cpp source at $llamaRepo"
 }
-$llama = Get-PinnedSource "llama-$patchId" $llamaRepo $llamaRevision
-$changes = @(Invoke-BuildTool git @('-C', $llama, 'status', '--porcelain'))
-if (!$changes.Count) {
-    Invoke-BuildTool git @('-C', $llama, '-c', 'core.autocrlf=false', 'apply', '--whitespace=nowarn', $patch)
-} else {
-    Invoke-BuildTool git @('-C', $llama, '-c', 'core.autocrlf=false', 'apply', '--reverse', '--check', $patch)
-}
+$llama = Get-PinnedSource "llama-$patchId" $llamaRepo $llamaRevision $patch
+Write-Host "[voxt] llama.cpp source ready (patch $patchId)."
 $headers = Get-PinnedSource 'OpenCL-Headers' $lock.opencl.headers.repo $lock.opencl.headers.commit
 $icd = Get-PinnedSource 'OpenCL-ICD-Loader' $lock.opencl.loader.repo $lock.opencl.loader.commit
 $toolchainVersion = $clangVersion
