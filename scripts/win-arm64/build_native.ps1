@@ -219,9 +219,7 @@ $backendFlags = @('-DGGML_NATIVE=OFF', '-DGGML_CPU_ARM_ARCH=armv8.2-a+dotprod', 
     '-DGGML_OPENCL=ON', '-DGGML_OPENCL_USE_ADRENO_KERNELS=ON')
 if ($Hexagon) {
     $llamaBuild = Join-Path $product "llama-$patchId"
-    # Use the driver's installed skels or a matching approved catalog and skels
-    # supplied via GGML_HEXAGON_LIBHTP_DIR. The upstream signing target also
-    # supports a certificate already configured for building these ops.
+    # An approved PFX can use the upstream signing target.
     $backendFlags += @('-DGGML_HEXAGON=ON', '-DPREBUILT_LIB_DIR=windows_aarch64', "-DHEXAGON_SDK_ROOT=$sdk",
         "-DHEXAGON_TOOLS_ROOT=$sdkTools", "-DGGML_HEXAGON_HTP_CERT=$env:HEXAGON_HTP_CERT")
 }
@@ -244,10 +242,34 @@ $manifest = [ordered]@{
     opencl_loader=$lock.opencl.loader.commit; opencl_headers=$lock.opencl.headers.commit
     toolchain=$toolchainVersion; build=($backendFlags -notlike '-DGGML_HEXAGON_HTP_CERT=*') -join ' '; files=$files
 }
-if ($Hexagon -and $env:HEXAGON_HTP_CERT) {
-    $ops = Join-Path $llamaBuild 'ggml/src/ggml-hexagon'
-    if (!(Test-Path -LiteralPath (Join-Path $ops 'libggml-htp.cat'))) { throw 'Signed GGML HTP catalog missing after build.' }
-    $manifest.htp_ops = $ops
+if ($Hexagon) {
+    $opsBuild = Join-Path $llamaBuild 'ggml/src/ggml-hexagon'
+    $opsName = 'libggml-htp-v73.so'
+    try {
+        if (!$env:HEXAGON_HTP_CERT) {
+            Write-Host '[voxt] Building the llama.cpp DSP library for Hexagon v73.'
+            Invoke-BuildTool cmake @('--build', $llamaBuild, '--target', 'htp-v73', '--parallel', "$Jobs") | Out-Host
+        }
+        $library = Join-Path $opsBuild $opsName
+        $opsHash = (Get-FileHash -LiteralPath $library -Algorithm SHA256).Hash.ToLowerInvariant()
+        $ops = $opsBuild
+        if (!$env:HEXAGON_HTP_CERT) {
+            # Keep any signed catalog paired with the exact DSP library it covers.
+            $ops = (New-Item -ItemType Directory -Force -Path (Join-Path $product "htp-v73-$($opsHash.Substring(0,16))")).FullName
+            Copy-Item -LiteralPath $library -Destination $ops -Force
+            $inf = Join-Path $ops 'libggml-htp.inf'
+            if (!(Test-Path -LiteralPath $inf -PathType Leaf)) {
+                Get-Content -LiteralPath (Join-Path $llama 'ggml/src/ggml-hexagon/libggml-htp.inf') |
+                    Where-Object { $_ -notmatch '\blibggml-htp-v(?!73\.)\d+\.so\b' } |
+                    Set-Content -LiteralPath $inf -Encoding ASCII
+            }
+        }
+        $manifest.htp_ops = $ops
+        $manifest.htp_ops_sha256 = $opsHash
+    } catch {
+        $manifest.htp_build_error = $_.Exception.Message
+        Write-Host "[voxt] DSP library build failed | $($manifest.htp_build_error)"
+    }
 }
 if (!$BackendOnly) { $manifest.voxt = $lock.voxt.public_commit }
 $manifest | ConvertTo-Json -Depth 5 | Set-Content -Encoding UTF8 -LiteralPath (Join-Path $product 'verify_native_manifest.json')

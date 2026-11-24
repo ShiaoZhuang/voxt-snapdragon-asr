@@ -28,29 +28,26 @@ try {
 }
 if ($hexagonBuilt) {
     try {
-        $ops = $env:GGML_HEXAGON_LIBHTP_DIR
-        if (!$ops) {
-            $manifest = Get-Content -LiteralPath (Join-Path $product 'verify_native_manifest.json') -Raw | ConvertFrom-Json
-            $ops = $manifest.htp_ops
-        }
-        if (!$ops) {
-            $lock = Get-Content -LiteralPath (Join-Path $PSScriptRoot '../../sources.lock.json') -Raw | ConvertFrom-Json
-            if ($manifest.llama_cpp -ne $lock.geniex_htp.test_host_revision) {
-                throw 'This llama.cpp revision is outside the pinned GenieX HTP test. Supply matching signed HTP libraries.'
-            }
-            $ops = & (Join-Path $PSScriptRoot 'get_ggml_htp_bundle.ps1') -Release $lock.geniex_htp `
-                -CacheDirectory (Join-Path $BuildDirectory 'sdk/geniex-htp')
-            $Summary.Add("Signed HTP libraries: Qualcomm GenieX $($lock.geniex_htp.version) | DSP llama.cpp $($lock.geniex_htp.llama_cpp.Substring(0, 7))")
-        }
+        $manifest = Get-Content -LiteralPath (Join-Path $product 'verify_native_manifest.json') -Raw | ConvertFrom-Json
+        if ($manifest.htp_build_error) { throw "llama.cpp DSP build failed | $($manifest.htp_build_error)" }
+        if (!$manifest.htp_ops -or !$manifest.htp_ops_sha256) { throw 'The native build manifest has no v73 DSP library.' }
+        $Summary.Add("llama.cpp DSP build: PASS | v73 package: $($manifest.htp_ops)")
+
+        $ops = $manifest.htp_ops
+        if ($env:GGML_HEXAGON_LIBHTP_DIR) { $ops = $env:GGML_HEXAGON_LIBHTP_DIR }
         $ops = (Resolve-Path -LiteralPath $ops).Path
-        foreach ($member in @('libggml-htp.cat', 'libggml-htp-v73.so')) {
-            if (!(Test-Path -LiteralPath (Join-Path $ops $member) -PathType Leaf)) { throw "Missing $member in $ops." }
+        $library = Join-Path $ops 'libggml-htp-v73.so'
+        if ((Get-FileHash -LiteralPath $library -Algorithm SHA256).Hash -ne $manifest.htp_ops_sha256) {
+            throw 'The signed directory must contain the v73 DSP library produced by this llama.cpp build.'
+        }
+        if (!(Test-Path -LiteralPath (Join-Path $ops 'libggml-htp.cat') -PathType Leaf)) {
+            throw "A device-trusted libggml-htp.cat is required for the package at $ops."
         }
         $Summary.Add("HTP library directory: $ops")
         $cases += 'hexagon-target', 'hexagon-draft'
     } catch {
-        $failed += 'signed HTP libraries'
-        $Summary.Add("Signed HTP libraries unavailable | $($_.Exception.Message)")
+        $failed += 'HTP v73 preparation'
+        $Summary.Add("HTP v73 unavailable | $($_.Exception.Message)")
         Write-Host "[voxt] $($Summary[$Summary.Count - 1])"
     }
 }

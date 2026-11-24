@@ -33,9 +33,7 @@ if ($LASTEXITCODE -eq 0) { git restore --source=FETCH_HEAD -- scripts/win-arm64/
 
 官网 ZIP 解压后可把 `HEXAGON_SDK_ROOT` 指向包含 `build/cmake/hexagon_fun.cmake` 的版本目录。该 SDK 缺少 Windows 可选扩展时，GGML 会在构建目录应用与 Community Edition Windows 发行包相同的兼容设置，也会识别 ZIP 中 `WinNT` 目录的 IDL 编译器。兼容处理保留原 SDK 文件。[上游 Windows SDK 补丁](https://github.com/snapdragon-toolchain/hexagon-sdk/blob/v6.7.0.0/patches/wos-patch)
 
-脚本在独立目录编译同时启用 OpenCL 和 Hexagon 的本地服务。Windows 的 GGML Hexagon 运行还依赖 NPU 驱动，以及设备信任的目录签名所覆盖的配套 DSP 算子库。已有的配套库可通过 `GGML_HEXAGON_LIBHTP_DIR` 配置。已有签名环境可用上游的 `HEXAGON_HTP_CERT` 参与构建。[固定版本的上游 Windows 说明](https://github.com/ggml-org/llama.cpp/blob/e412c6f468b7b9e0f16f2540244236f8ad68e9ae/docs/backend/snapdragon/windows.md)
-
-没有配置配套库时，脚本优先取 Downloads 或 `build/win-arm64-native/sdk/geniex-htp` 里的 `geniex-sdk-windows-arm64-v0.11.0.zip`，也可自动从 Qualcomm 发布页下载，限时两分钟。脚本先校验发布包和文件的 SHA-256，只提取微软签名目录及配套 DSP 库，保存在本地构建目录并传给 HTP 转录进程。脚本无需安装 GenieX，也无需导入证书。下载失败时报告会列出原始错误，Adreno 测速仍会继续。[Qualcomm 签名发行包](https://github.com/qualcomm/GenieX/releases/tag/v0.11.0)
+脚本从同一份固定 llama.cpp 源码构建 Windows 服务和 v73 DSP 算子库。已有获准的签名环境时，可设置 `HEXAGON_HTP_CERT` 为对应 PFX 路径，并使用上游的 Windows WDK 签名构建。否则脚本将本地 `libggml-htp-v73.so` 和配套 INF 放入报告列出的 `v73 package` 目录，供设备策略认可的签名流程使用。签名完成后把 `libggml-htp.cat` 放回同一目录，或将 `GGML_HEXAGON_LIBHTP_DIR` 指向包含同一 SHA-256 算子库及其签名 catalog 的目录，再运行原命令。签名文件缺失时，脚本报告所需文件并继续 Adreno 测速。[固定版本的上游 Windows 说明](https://github.com/ggml-org/llama.cpp/blob/e412c6f468b7b9e0f16f2540244236f8ad68e9ae/docs/backend/snapdragon/windows.md)
 
 对同一条 `zh-plain-1.wav`，脚本分别运行 Adreno 和 HTP0 Target，每种设备各测 Target-only 和 Q4 DFlash。音频投影及可选草稿都在 Adreno。每个测试启动独立服务，比对 Adreno Target-only 的完整 token 序列和转录文本。GGML Hexagon 还要求请求开始后出现有非零周期的 DSP 算子记录。GGML 调度器可能将部分计算放在主机上。两侧都通过时，报告会按同一模式给出 Hexagon / Adreno 请求吞吐倍率。每个测试的 `.txt` 保存原始日志，`.metrics.json` 保存文本、token 和计时。摘要中的 request tok/s 使用生成 token 数（排除 EOS）除以 HTTP 请求时间，包括音频预填充和解码，排除启动加载时间。HTP 测试打开了设备 profiling。
 
