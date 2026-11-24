@@ -518,6 +518,18 @@ diff --git a/src/llama-context.cpp b/src/llama-context.cpp
 
  build_idl(htp/htp_iface.idl htp_iface)
 
+@@ -69,6 +73,11 @@
+ if (WIN32)
+     # some clang-cl drivers do not predefine ARM64 macros for winnt.h
+     target_compile_definitions(${TARGET_NAME} PRIVATE _M_ARM64=1 _ARM64_=1)
++    if (NOT BUILD_SHARED_LIBS)
++        # Both the generated stub and GGML call the in-process FastRPC wrappers.
++        target_compile_definitions(htp_iface PRIVATE STATIC_LIB)
++        target_compile_definitions(${TARGET_NAME} PRIVATE STATIC_LIB)
++    endif()
+ endif()
+
+ target_link_libraries(${TARGET_NAME} PRIVATE htp_iface)
 --- a/ggml/src/ggml-hexagon/htp/CMakeLists.txt
 +++ b/ggml/src/ggml-hexagon/htp/CMakeLists.txt
 @@ -1,7 +1,7 @@
@@ -577,3 +589,16 @@ diff --git a/src/llama-context.cpp b/src/llama-context.cpp
 +endif()
 +
 +include("${ggml_hexagon_sdk_functions}")
+--- a/ggml/src/ggml-hexagon/htp-drv.h
++++ b/ggml/src/ggml-hexagon/htp-drv.h
+@@ -13,7 +13,9 @@
+ #include <remote.h>
+ #include <dspqueue.h>
+
+-#if defined(_WIN32) && !defined(__MINGW32__)
++#if !defined(GGML_BACKEND_SHARED)
++#    define HTPDRV_API extern
++#elif defined(_WIN32) && !defined(__MINGW32__)
+ #    ifdef GGML_BACKEND_BUILD
+ #        define HTPDRV_API __declspec(dllexport) extern
+ #    else
