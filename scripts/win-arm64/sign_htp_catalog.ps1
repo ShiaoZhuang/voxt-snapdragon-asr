@@ -40,7 +40,18 @@ function Get-NuGetSigningTool([string]$Tool, $Release) {
         $partial = "$cached.partial-$([guid]::NewGuid())"
         try {
             Write-Host "[voxt] Downloading $Tool from Microsoft NuGet (up to 90 seconds)."
+            $timer = [Diagnostics.Stopwatch]::StartNew()
             $result = Invoke-PinnedPackageCurl $curl.Source $Release.url $partial 90 20
+            $remaining = [int][Math]::Floor(90 - $timer.Elapsed.TotalSeconds)
+            if ($result.Code -eq 28 -and $remaining -gt 0) {
+                Write-Host "[voxt] NuGet transfer stalled. Trying Windows PowerShell for the remaining ${remaining}s."
+                if (Test-Path -LiteralPath $partial) { Remove-Item -LiteralPath $partial -Force }
+                $web = Invoke-BoundedWindowsTool (Get-Process -Id $PID).Path @('-NoProfile', '-NonInteractive', '-File',
+                    (Join-Path $PSScriptRoot 'download_hexagon_sdk_web.ps1'), '-Uri', $Release.url,
+                    '-Archive', $partial, '-TimeoutSeconds', "$remaining") $remaining
+                if ($web.Code -ne 0) { throw "$Tool package download failed | $($result.Detail) | PowerShell: $($web.Detail) | $hint" }
+                $result = $web
+            }
             if ($result.Code -ne 0) { throw "$Tool package download failed (curl exit $($result.Code)) | $($result.Detail) | $hint" }
             if ((Get-FileHash -LiteralPath $partial -Algorithm SHA256).Hash -ne $Release.sha256) {
                 throw "SHA-256 mismatch for downloaded $name."

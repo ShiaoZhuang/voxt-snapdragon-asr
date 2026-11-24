@@ -60,31 +60,45 @@ def calibrate(target, aux, capture, model_path, *, cpu_test=False):
     return int(cache_shape[2])
 
 
+def exchange_io(operation, action):
+    deadline = time.monotonic() + 2
+    while True:
+        try:
+            return action()
+        except PermissionError as error:
+            if time.monotonic() >= deadline:
+                raise RuntimeError(f"{operation}: {error}") from error
+            time.sleep(0.025)
+
+
 def read_request(path, history_capacity, embedding, rope):
-    with path.open("rb") as request:
-        n = int(np.fromfile(request, "<i4", 1)[0])
-        if not 0 <= n <= history_capacity:
-            raise ValueError(f"history length {n} exceeds capacity {history_capacity}")
-        tokens = np.fromfile(request, "<i4", ROWS)
-        positions = np.fromfile(request, "<i4", 4 * ROWS).reshape(4, ROWS)
-        if len(tokens) != ROWS or np.any(tokens < 0) or np.any(tokens >= VOCAB):
-            raise ValueError("invalid verification token ids")
-        residual = gguf.dequantize(embedding.data[tokens], embedding.tensor_type).astype(np.float16)
-        cos, sin = rotary_tables_for_positions(rope, positions)
-        mask = np.full((1, 1, ROWS, history_capacity + ROWS), -np.inf, dtype=np.float16)
-        mask[..., :n] = 0
-        for row in range(ROWS):
-            mask[..., row, history_capacity:history_capacity + row + 1] = 0
-        feeds = {"residual": residual, "attn_mask": mask,
-                 "rope_cos": np.concatenate((cos, cos), axis=-1).astype(np.float16),
-                 "rope_sin": np.concatenate((-sin, sin), axis=-1).astype(np.float16)}
-        for layer in range(LAYERS):
-            for kind in ("key", "value"):
-                kv = np.zeros((1, 8, history_capacity, 128), dtype=np.float16)
-                kv[:, :, :n, :] = np.fromfile(request, "<f2", n * 1024).reshape(n, 8, 128).swapaxes(0, 1)
-                feeds[f"L{layer}_past_{kind}"] = kv
-        if request.read(1):
-            raise ValueError("unexpected verification request length")
+    packet = exchange_io("read published request", path.read_bytes)
+    n = int(np.frombuffer(packet, "<i4", 1)[0])
+    if not 0 <= n <= history_capacity:
+        raise ValueError(f"history length {n} exceeds capacity {history_capacity}")
+    header_size = 4 * (1 + 5 * ROWS)
+    if len(packet) != header_size + LAYERS * 2 * n * 1024 * 2:
+        raise ValueError("unexpected verification request length")
+    tokens = np.frombuffer(packet, "<i4", ROWS, 4)
+    positions = np.frombuffer(packet, "<i4", 4 * ROWS, 4 + 4 * ROWS).reshape(4, ROWS)
+    if len(tokens) != ROWS or np.any(tokens < 0) or np.any(tokens >= VOCAB):
+        raise ValueError("invalid verification token ids")
+    residual = gguf.dequantize(embedding.data[tokens], embedding.tensor_type).astype(np.float16)
+    cos, sin = rotary_tables_for_positions(rope, positions)
+    mask = np.full((1, 1, ROWS, history_capacity + ROWS), -np.inf, dtype=np.float16)
+    mask[..., :n] = 0
+    for row in range(ROWS):
+        mask[..., row, history_capacity:history_capacity + row + 1] = 0
+    feeds = {"residual": residual, "attn_mask": mask,
+             "rope_cos": np.concatenate((cos, cos), axis=-1).astype(np.float16),
+             "rope_sin": np.concatenate((-sin, sin), axis=-1).astype(np.float16)}
+    offset = header_size
+    for layer in range(LAYERS):
+        for kind in ("key", "value"):
+            kv = np.zeros((1, 8, history_capacity, 128), dtype=np.float16)
+            kv[:, :, :n, :] = np.frombuffer(packet, "<f2", n * 1024, offset).reshape(n, 8, 128).swapaxes(0, 1)
+            offset += n * 1024 * 2
+            feeds[f"L{layer}_past_{kind}"] = kv
     return feeds
 
 
@@ -119,11 +133,12 @@ def serve(args):
     try:
         while not (folder / "stop").exists():
             request = folder / "request.bin"
-            if not request.exists():
+            try:
+                feeds = read_request(request, capacity, embedding, rope)
+            except FileNotFoundError:
                 time.sleep(0.002)
                 continue
-            feeds = read_request(request, capacity, embedding, rope)
-            request.unlink()
+            exchange_io("remove consumed request", request.unlink)
             names = [f"L{i}_{kind}" for i in range(LAYERS) for kind in ("K", "V")] + [
                 f"hidden_{i}" for i in aux + [LAYERS]]
             start = time.perf_counter()
@@ -135,11 +150,11 @@ def serve(args):
             stage = folder / "response.tmp"
             with stage.open("wb") as response:
                 for kv in values[:LAYERS * 2]:
-                    kv.swapaxes(1, 2).astype("<f2", copy=False).tofile(response)
+                    response.write(kv.swapaxes(1, 2).astype("<f2", copy=False).tobytes())
                 for hidden in values[LAYERS * 2:-1]:
-                    hidden.astype("<f4").tofile(response)
-                logits.astype("<f4", copy=False).tofile(response)
-            stage.replace(folder / "response.bin")
+                    response.write(hidden.astype("<f4").tobytes())
+                response.write(logits.astype("<f4", copy=False).tobytes())
+            exchange_io("publish verifier response", lambda: stage.replace(folder / "response.bin"))
             count += 1
     finally:
         events = 0 if args.cpu_test else htp_execute_events(session.end_profiling())

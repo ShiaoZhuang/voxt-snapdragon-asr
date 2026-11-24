@@ -37,7 +37,7 @@ if ($LASTEXITCODE -eq 0) { git restore --source=FETCH_HEAD -- scripts/win-arm64/
 
 两个证书库都找不到合适的证书时，脚本使用当前用户的临时自签名证书试跑。自签包保存在该轮日志目录，签名后清理临时证书和私钥。即使通用签名验证返回错误，也会用正常 HTP 加载路径实测，并保留原始错误。[PowerShell 测试证书文档](https://learn.microsoft.com/en-us/powershell/module/pki/new-selfsignedcertificate)
 
-缺少 `Inf2Cat` 或 `SignTool` 时，脚本查找 Downloads 和构建缓存里的同名 NuGet 包，或从微软 NuGet 下载相应工具包。每个包的 90 秒预算包含与 Hexagon SDK 共用的 Schannel 重试。脚本核对 SHA-256 并在本轮日志目录解包工具及依赖。[微软 WDK NuGet 说明](https://learn.microsoft.com/windows-hardware/drivers/install-the-wdk-using-nuget) · [curl 的吊销检查参数](https://curl.se/docs/manpage.html#--ssl-revoke-best-effort)
+缺少 `Inf2Cat` 或 `SignTool` 时，脚本查找 Downloads 和构建缓存里的同名 NuGet 包，或从微软 NuGet 下载相应工具包。每个包的 90 秒预算包含与 Hexagon SDK 共用的 Schannel 重试。若 curl 传输超时（退出码 28），脚本在剩余预算内用 Windows PowerShell 再取一次。脚本核对 SHA-256 并在本轮日志目录解包工具及依赖。[微软 WDK NuGet 说明](https://learn.microsoft.com/windows-hardware/drivers/install-the-wdk-using-nuget) · [curl 的吊销检查参数](https://curl.se/docs/manpage.html#--ssl-revoke-best-effort)
 
 工具或签名失败时，报告会打印原因和待签的 `v73 package` 目录。可以把匹配的 `libggml-htp.cat` 放回该目录，也可将 `GGML_HEXAGON_LIBHTP_DIR` 指向包含同一 SHA-256 算子库及其签名 catalog 的目录。已有 PFX 环境仍可设置 `HEXAGON_HTP_CERT` 使用上游构建签名路径。[固定版本的上游 Windows 说明](https://github.com/ggml-org/llama.cpp/blob/e412c6f468b7b9e0f16f2540244236f8ad68e9ae/docs/backend/snapdragon/windows.md)
 
