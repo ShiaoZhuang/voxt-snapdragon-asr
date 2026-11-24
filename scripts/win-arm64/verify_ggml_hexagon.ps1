@@ -11,7 +11,7 @@ $Summary.Add('GGML Hexagon | zh-plain-1 | target on HTP0, audio and optional Q4 
 $failed = @()
 $cases = @('adreno-target', 'adreno-draft')
 try {
-    & (Join-Path $PSScriptRoot 'build_native.ps1') -BuildDirectory $BuildDirectory -BackendOnly -Hexagon | Out-Host
+    & (Join-Path $PSScriptRoot 'build_native.ps1') -BuildDirectory $BuildDirectory -BackendOnly -Hexagon -InstallHexagonSdk | Out-Host
     $product = Join-Path $BuildDirectory 'hexagon'
     $Summary.Add('GGML Hexagon native Windows build: PASS')
     $cases += 'hexagon-target', 'hexagon-draft'
@@ -23,6 +23,7 @@ try {
     $product = $BuildDirectory
 }
 $baseline = $null
+$rates = @{}
 foreach ($name in $cases) {
     $path = Join-Path $LogDirectory "$name.txt"
     $backend = if ($name -like 'adreno-*') { 'opencl' } else { 'hexagon' }
@@ -48,8 +49,9 @@ foreach ($name in $cases) {
                 $events++
             }
         }
+        $rate = $m.tokens * 1000 / $m.wall_ms
         $Summary.Add(('{0} | {1} tokens / {2:F0} ms = {3:F2} request tok/s | DSP profile events {4}' -f
-            $name, $m.tokens, $m.wall_ms, ($m.tokens * 1000 / $m.wall_ms), $events))
+            $name, $m.tokens, $m.wall_ms, $rate, $events))
         if ($backend -eq 'hexagon' -and !$events) { throw 'No timed HTP0 operation in GGML profiler.' }
         if ($draft -and ($m.rounds -le 0 -or $m.proposed -le 0)) { throw 'Missing speculative verification rounds.' }
         if ($name -eq 'adreno-target') { $baseline = $m }
@@ -57,9 +59,16 @@ foreach ($name in $cases) {
             throw 'Adreno baseline missing or generated text/token sequence differs. Inspect the metrics JSON files.'
         }
         $Summary.Add("${name}: PASS | $($m.text)")
+        $rates[$name] = $rate
     } catch {
         $failed += $name
         $Summary.Add("${name}: FAIL | $($_.Exception.Message)")
+    }
+}
+foreach ($mode in @('target', 'draft')) {
+    if ($rates.ContainsKey("hexagon-$mode") -and $rates.ContainsKey("adreno-$mode")) {
+        $Summary.Add(('{0} | Hexagon / Adreno request throughput: {1:F2}x' -f
+            $mode, ($rates["hexagon-$mode"] / $rates["adreno-$mode"])))
     }
 }
 if ($failed.Count) { throw "Incomplete steps: $($failed -join ', '). See the details above." }

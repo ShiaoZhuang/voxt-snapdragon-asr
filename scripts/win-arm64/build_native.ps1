@@ -4,7 +4,8 @@ param(
     [ValidateRange(1,64)][int]$Jobs = 6,
     [switch]$ToolchainCheck,
     [switch]$BackendOnly,
-    [switch]$Hexagon
+    [switch]$Hexagon,
+    [switch]$InstallHexagonSdk
 )
 
 $ErrorActionPreference = 'Stop'
@@ -112,14 +113,23 @@ function Assert-Arm64PE([string]$Path) {
 
 $build = (New-Item -ItemType Directory -Path $BuildDirectory -Force).FullName
 $null = New-Item -ItemType Directory -Path (Join-Path $build 'src') -Force
+$lock = Get-Content -Raw -LiteralPath (Join-Path $root 'sources.lock.json') | ConvertFrom-Json
 $product = $build
 if ($Hexagon) {
     $product = Join-Path $build 'hexagon'
-    $sdk = & (Join-Path $PSScriptRoot 'find_hexagon_sdk.ps1')
+    $sdkTools = $env:HEXAGON_TOOLS_ROOT
+    try {
+        $sdk = & (Join-Path $PSScriptRoot 'find_hexagon_sdk.ps1')
+    } catch {
+        if (!$InstallHexagonSdk) { throw }
+        Write-Host $_.Exception.Message
+        $sdk = & (Join-Path $PSScriptRoot 'install_hexagon_sdk.ps1') -CacheDirectory (Join-Path $build 'sdk/hexagon') -Release $lock.hexagon_sdk
+        # Resolve the pinned compiler through the installed SDK's metadata.
+        $sdkTools = ''
+    }
     Write-Host "Hexagon SDK: $sdk"
 }
 $bin = (New-Item -ItemType Directory -Path (Join-Path $product 'bin') -Force).FullName
-$lock = Get-Content -Raw -LiteralPath (Join-Path $root 'sources.lock.json') | ConvertFrom-Json
 $patchSource = Join-Path $root 'patches/llama-voxt.patch'
 $patch = Join-Path $build 'llama-voxt.patch'
 # Existing worktrees may still have CRLF even after Git's attributes change.
@@ -193,7 +203,7 @@ if ($Hexagon) {
     # supplied via GGML_HEXAGON_LIBHTP_DIR. The upstream signing target also
     # supports a certificate already configured for building these ops.
     $backendFlags += @('-DGGML_HEXAGON=ON', '-DPREBUILT_LIB_DIR=windows_aarch64', "-DHEXAGON_SDK_ROOT=$sdk",
-        "-DHEXAGON_TOOLS_ROOT=$env:HEXAGON_TOOLS_ROOT", "-DGGML_HEXAGON_HTP_CERT=$env:HEXAGON_HTP_CERT")
+        "-DHEXAGON_TOOLS_ROOT=$sdkTools", "-DGGML_HEXAGON_HTP_CERT=$env:HEXAGON_HTP_CERT")
 }
 Invoke-BuildTool cmake (@('-S', $llama, '-B', $llamaBuild) + $cmakeFlags + $backendFlags + @(
     '-DBUILD_SHARED_LIBS=OFF', "-DOpenCL_INCLUDE_DIR=$headers", "-DOpenCL_LIBRARY=$(Join-Path $icdBuild 'OpenCL.lib')",

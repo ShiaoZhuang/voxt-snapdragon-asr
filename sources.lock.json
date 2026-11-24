@@ -1,4 +1,9 @@
 {
+  "hexagon_sdk": {
+    "version": "6.7.0.0",
+    "url": "https://github.com/snapdragon-toolchain/hexagon-sdk/releases/download/v6.7.0.0/hexagon-sdk-v6.7.0.0-arm64-wos.tar.xz",
+    "sha256": "9eb256cc7b102f721365151a470a33980069a18b9209e1d56a6d2fa430369759"
+  },
   "opencl": {
     "headers": {
       "repo": "https://github.com/KhronosGroup/OpenCL-Headers.git",
