@@ -41,7 +41,8 @@ if ($hexagonBuilt) {
             throw 'The signed directory must contain the v73 DSP library produced by this llama.cpp build.'
         }
         if (!(Test-Path -LiteralPath (Join-Path $ops 'libggml-htp.cat') -PathType Leaf)) {
-            throw "A device-trusted libggml-htp.cat is required for the package at $ops."
+            Write-Host '[voxt] Checking the Windows certificate stores for a code-signing key.'
+            & (Join-Path $PSScriptRoot 'sign_htp_catalog.ps1') -PackageDirectory $ops -Summary $Summary
         }
         $Summary.Add("HTP library directory: $ops")
         $cases += 'hexagon-target', 'hexagon-draft'
