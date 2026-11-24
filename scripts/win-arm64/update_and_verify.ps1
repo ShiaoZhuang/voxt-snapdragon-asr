@@ -1,5 +1,8 @@
 [CmdletBinding()]
-param([string]$InstallDirectory)
+param(
+    [string]$InstallDirectory,
+    [ValidateSet('All', 'QnnLive', 'GgmlHexagon')][string]$Route = 'All'
+)
 
 $ErrorActionPreference = 'Stop'
 $root = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '../..')).Path
@@ -21,26 +24,77 @@ $lastGitDetails = @()
 $outcome = 'FAIL'
 $stage = 'sync'
 
-function Invoke-LoggedProcess([string]$Exe, [string[]]$Arguments, [string]$Name) {
+function Stop-HandoffProcess([Diagnostics.Process]$Process) {
+    if ($Process.HasExited) { return }
+    if ($PSVersionTable.PSEdition -eq 'Core') {
+        $Process.Kill($true)
+    } else {
+        & taskkill.exe /PID $Process.Id /T /F | Out-Null
+        if (!$Process.HasExited) { $Process.Kill() }
+    }
+}
+
+function Invoke-LoggedProcess([string]$Exe, [string[]]$Arguments, [string]$Name, [int]$TimeoutSeconds) {
     $start = [Diagnostics.ProcessStartInfo]::new($Exe)
     $start.Arguments = ($Arguments | ForEach-Object { '"' + ($_ -replace '(\\+)$', '$1$1') + '"' }) -join ' '
     $start.WorkingDirectory = $root
     $start.UseShellExecute = $false
     $start.RedirectStandardOutput = $true
     $start.RedirectStandardError = $true
-    $stdout = [IO.File]::Create((Join-Path $logs "$Name.stdout.log"))
+    $start.StandardOutputEncoding = [Text.Encoding]::UTF8
+    $start.StandardErrorEncoding = [Text.Encoding]::UTF8
+    $stdout = [IO.StreamWriter]::new((Join-Path $logs "$Name.stdout.log"), $false, [Text.UTF8Encoding]::new($false))
     try {
-        $stderr = [IO.File]::Create((Join-Path $logs "$Name.stderr.log"))
+        $stderr = [IO.StreamWriter]::new((Join-Path $logs "$Name.stderr.log"), $false, [Text.UTF8Encoding]::new($false))
         try {
+            $stdout.AutoFlush = $true
+            $stderr.AutoFlush = $true
             $child = [Diagnostics.Process]::Start($start)
             try {
-                $outCopy = $child.StandardOutput.BaseStream.CopyToAsync($stdout)
-                $errCopy = $child.StandardError.BaseStream.CopyToAsync($stderr)
-                $child.WaitForExit()
-                [void]$outCopy.GetAwaiter().GetResult()
-                [void]$errCopy.GetAwaiter().GetResult()
+                $outLine = $child.StandardOutput.ReadLineAsync()
+                $errLine = $child.StandardError.ReadLineAsync()
+                $timer = [Diagnostics.Stopwatch]::StartNew()
+                $nextUpdate = 30
+                $lastPhase = $Name
+                while ($outLine -or $errLine -or !$child.HasExited) {
+                    $didRead = $false
+                    if ($outLine -and $outLine.IsCompleted) {
+                        $line = $outLine.GetAwaiter().GetResult()
+                        $outLine = $null
+                        if ($null -ne $line) {
+                            $stdout.WriteLine($line)
+                            if ($Name -eq 'workflow' -and $line.StartsWith('[voxt] ')) {
+                                Write-Host $line
+                                $lastPhase = $line.Substring(7)
+                                $nextUpdate = $timer.Elapsed.TotalSeconds + 30
+                            }
+                            $outLine = $child.StandardOutput.ReadLineAsync()
+                        }
+                        $didRead = $true
+                    }
+                    if ($errLine -and $errLine.IsCompleted) {
+                        $line = $errLine.GetAwaiter().GetResult()
+                        $errLine = $null
+                        if ($null -ne $line) {
+                            $stderr.WriteLine($line)
+                            if ($Name -eq 'workflow') { Write-Host $line }
+                            $errLine = $child.StandardError.ReadLineAsync()
+                        }
+                        $didRead = $true
+                    }
+                    if ($timer.Elapsed.TotalSeconds -ge $TimeoutSeconds) {
+                        throw "$Name timed out after ${TimeoutSeconds}s. Last stage: $lastPhase"
+                    }
+                    if ($Name -eq 'workflow' -and $timer.Elapsed.TotalSeconds -ge $nextUpdate) {
+                        Write-Host ("[voxt] Still running ({0:F0}s total) | {1}" -f $timer.Elapsed.TotalSeconds, $lastPhase)
+                        $nextUpdate = $timer.Elapsed.TotalSeconds + 30
+                    }
+                    if (!$didRead) { Start-Sleep -Milliseconds 100 }
+                }
                 return $child.ExitCode
-            } finally { $child.Dispose() }
+            } finally {
+                try { Stop-HandoffProcess $child } finally { $child.Dispose() }
+            }
         } finally { $stderr.Dispose() }
     } finally { $stdout.Dispose() }
 }
@@ -48,7 +102,7 @@ function Invoke-LoggedProcess([string]$Exe, [string[]]$Arguments, [string]$Name)
 function Invoke-HandoffGit([string[]]$Arguments) {
     $script:gitStep++
     $name = 'git-{0:D2}' -f $script:gitStep
-    $status = Invoke-LoggedProcess $git $Arguments $name
+    $status = Invoke-LoggedProcess $git $Arguments $name 180
     if ($status -ne 0) {
         $script:lastGitDetails = @(Get-Content -Encoding UTF8 -Tail 6 -LiteralPath (Join-Path $logs "$name.stderr.log"))
         throw "Git failed (exit $status): $($Arguments -join ' ')"
@@ -87,12 +141,10 @@ try {
     $pwsh = (Get-Process -Id $PID).Path
     $workflow = Join-Path $worktree 'scripts/win-arm64/current_handoff.ps1'
     $build = Join-Path $root 'build/win-arm64-native'
-    $status = Invoke-LoggedProcess $pwsh @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', $workflow,
-        '-InstallDirectory', $InstallDirectory, '-BuildDirectory', $build, '-LogDirectory', $logs) 'workflow'
-    $details = Join-Path $logs 'workflow_summary.txt'
-    if (Test-Path -LiteralPath $details -PathType Leaf) {
-        foreach ($line in @(Get-Content -Encoding UTF8 -LiteralPath $details)) { $summary.Add($line) }
-    }
+    $workflowArgs = @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', $workflow,
+        '-InstallDirectory', $InstallDirectory, '-BuildDirectory', $build, '-LogDirectory', $logs)
+    if ($Route -ne 'All') { $workflowArgs += @('-Route', $Route) }
+    $status = Invoke-LoggedProcess $pwsh $workflowArgs 'workflow' 2100
     if ($status -ne 0) {
         $stderr = Join-Path $logs 'workflow.stderr.log'
         $stdout = Join-Path $logs 'workflow.stdout.log'
@@ -111,6 +163,10 @@ try {
     $summary.Add("Error: $($_.Exception.Message)")
 } finally {
     if ($lock) { $lock.Dispose() }
+    $details = Join-Path $logs 'workflow_summary.txt'
+    if (Test-Path -LiteralPath $details -PathType Leaf) {
+        foreach ($line in @(Get-Content -Encoding UTF8 -LiteralPath $details)) { $summary.Add($line) }
+    }
     $report = Join-Path $logs 'handoff_report.txt'
     $summary.Insert(0, "Result: $outcome | Stage: $stage")
     $summary.Add("Logs: $logs")

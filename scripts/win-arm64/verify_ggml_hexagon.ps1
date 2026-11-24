@@ -11,6 +11,7 @@ $Summary.Add('GGML Hexagon | zh-plain-1 | target on HTP0, audio and optional Q4 
 $failed = @()
 $cases = @('adreno-target', 'adreno-draft')
 try {
+    Write-Host "[voxt] Checking the Hexagon SDK and building GGML Hexagon."
     & (Join-Path $PSScriptRoot 'build_native.ps1') -BuildDirectory $BuildDirectory -BackendOnly -Hexagon -InstallHexagonSdk | Out-Host
     $product = Join-Path $BuildDirectory 'hexagon'
     $Summary.Add('GGML Hexagon native Windows build: PASS')
@@ -18,6 +19,8 @@ try {
 } catch {
     $failed += 'Hexagon build'
     $Summary.Add("GGML Hexagon build blocked | $($_.Exception.Message)")
+    Write-Host "[voxt] $($Summary[$Summary.Count - 1])"
+    Write-Host "[voxt] Continuing with the Adreno baseline."
     $Summary.Add('Running both Adreno measurements with the local OpenCL build.')
     & (Join-Path $PSScriptRoot 'build_native.ps1') -BuildDirectory $BuildDirectory -BackendOnly | Out-Host
     $product = $BuildDirectory
@@ -25,6 +28,7 @@ try {
 $baseline = $null
 $rates = @{}
 foreach ($name in $cases) {
+    Write-Host "[voxt] Running $name."
     $path = Join-Path $LogDirectory "$name.txt"
     $backend = if ($name -like 'adreno-*') { 'opencl' } else { 'hexagon' }
     $draft = $name -like '*-draft'

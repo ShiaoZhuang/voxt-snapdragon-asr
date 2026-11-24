@@ -13,11 +13,13 @@ $python = @('qnn-probe-venv', 'qnn-probe-venv-arm64') | ForEach-Object {
 } | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
 if (!$python) { throw 'QNN Python environment from the device replay is required.' }
 
+Write-Host '[voxt] Building the native backend for QNN live.'
 & (Join-Path $PSScriptRoot 'build_native.ps1') -BuildDirectory $BuildDirectory -BackendOnly | Out-Host
 $probe = Join-Path $PSScriptRoot 'probe_opencl_startup.ps1'
 $probeArgs = @{InstallDirectory=$InstallDirectory; NativeBuildDirectory=$BuildDirectory; Transcribe=$true; Draft=$true}
 $capture = Join-Path $LogDirectory 'live-calibration'
 $calibrationLog = Join-Path $LogDirectory 'live-calibration.txt'
+Write-Host '[voxt] Capturing the eight-position calibration batch.'
 & $probe @probeArgs -CaptureDirectory $capture -CaptureAllLayers -ReportPath $calibrationLog | Out-Host
 if (!(Test-Path -LiteralPath (Join-Path $capture 'target_logits.f32') -PathType Leaf)) {
     throw "No complete capture for QNN calibration. See $calibrationLog"
@@ -46,9 +48,11 @@ function Invoke-LiveClip([string]$Name, [string]$Directory) {
     }
 }
 
+Write-Host '[voxt] Measuring all-GPU DFlash.'
 $baseline = Invoke-LiveClip 'live-gpu-dflash' ''
 $Summary.Add(('All-GPU DFlash | {0} tokens | {1:F0} ms | {2:F2} request tok/s' -f
     $baseline.Metrics.tokens, $baseline.Metrics.wall_ms, $baseline.Rate))
+Write-Host "[voxt] $($Summary[$Summary.Count - 1])"
 $workerDirectory = (New-Item -ItemType Directory -Path (Join-Path $LogDirectory 'live-qnn-worker')).FullName
 $workerError = Join-Path $workerDirectory 'error.json'
 $workerOut = Join-Path $workerDirectory 'stdout.log'
@@ -61,6 +65,7 @@ $processArgs = @{
     FilePath=$python; ArgumentList=$quoted; NoNewWindow=$true; PassThru=$true
     RedirectStandardOutput=$workerOut; RedirectStandardError=(Join-Path $workerDirectory 'stderr.log')
 }
+Write-Host '[voxt] Calibrating and initializing the QNN verifier (up to 12 minutes).'
 $worker = Start-Process @processArgs
 try {
     $deadline = (Get-Date).AddMinutes(12)
@@ -75,6 +80,7 @@ try {
     }
     $ready = Get-Content -Raw -LiteralPath (Join-Path $workerDirectory 'ready.json') | ConvertFrom-Json
     $Summary.Add("QNN verifier ready | history capacity $($ready.history_capacity) tokens")
+    Write-Host '[voxt] Measuring GPU + HTP DFlash.'
     $hybrid = Invoke-LiveClip 'live-qnn-dflash' $workerDirectory
 } finally {
     if (!$worker.HasExited) {

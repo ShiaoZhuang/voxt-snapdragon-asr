@@ -2,11 +2,11 @@
 
 ## 固定入口
 
-在骁龙本仓库根目录首次获取启动脚本：
+旧启动器只更新独立工作树中的测试代码。要启用实时进度和超时保护，请在骁龙本仓库根目录刷新本地启动器一次：
 
 ```powershell
-git fetch origin tag veri-1-auto-handoff
-git switch --detach veri-1-auto-handoff
+git fetch origin veri/native-win-arm64
+if ($LASTEXITCODE -eq 0) { git restore --source=FETCH_HEAD -- scripts/win-arm64/update_and_verify.ps1 }
 ```
 
 以后每轮在同一仓库根目录运行同一条命令：
@@ -14,6 +14,8 @@ git switch --detach veri-1-auto-handoff
 ```powershell
 .\scripts\win-arm64\update_and_verify.ps1
 ```
+
+启动器会显示正在运行的阶段、错误和每 30 秒的等待提示。验证阶段超过 35 分钟会退出并保留已有报告。可用 `-Route QnnLive` 单独跑混合转录对照，或用 `-Route GgmlHexagon` 单独跑 GGML。
 
 当前固定入口先用同一条 `zh-plain-1.wav` 比较全 GPU DFlash 和 GPU + QNN HTP DFlash 的完整请求，再运行独立的 GGML Hexagon 验证。QNN 回放已通过，完整请求使用现有的 ARM64 QNN Python 环境。GGML Hexagon 构建受阻时会记录具体原因，并用本地 OpenCL 服务继续完成两组 Adreno 测速。请拍最后的 **VOXT SNAPDRAGON REPORT**，若一屏放不下，请分两张。无需重跑 31 条 CPU 基准。
 
@@ -27,7 +29,7 @@ git switch --detach veri-1-auto-handoff
 
 ## GGML Hexagon 音频转录
 
-脚本先查找现有 Hexagon SDK。找不到时下载 llama.cpp 指南列出的 Windows ARM64 Hexagon SDK Community Edition 6.7.0.0（约 900 MB），校验发布包的 SHA-256，解压到 `build/win-arm64-native/sdk/hexagon`，并在这次构建中传入 SDK 路径。下次会复用该目录。curl 下载失败后，脚本会用 PowerShell 的网络设置重试同一发布包。默认 Downloads 或 SDK 缓存目录里的同名发布包可直接校验和解压。下载或构建受阻时，固定命令仍会用本机 OpenCL 构建测 Adreno。[上游 SDK 发行页](https://github.com/snapdragon-toolchain/hexagon-sdk/releases/tag/v6.7.0.0)
+脚本先查找现有 Hexagon SDK。找不到时下载 llama.cpp 指南列出的 Windows ARM64 Hexagon SDK Community Edition 6.7.0.0（约 900 MB），校验发布包的 SHA-256，解压到 `build/win-arm64-native/sdk/hexagon`，并在这次构建中传入 SDK 路径。下次会复用该目录。在线下载总预算为 8 分钟。Windows 无法确认 TLS 证书吊销状态时，脚本会立即显示原始错误并结束该下载；其他网络错误可在剩余预算内用 PowerShell 重试。默认 Downloads 或 SDK 缓存目录里的同名发布包可直接校验和解压。下载或构建受阻时，固定命令仍会用本机 OpenCL 构建测 Adreno。[上游 SDK 发行页](https://github.com/snapdragon-toolchain/hexagon-sdk/releases/tag/v6.7.0.0)
 
 脚本在独立目录编译同时启用 OpenCL 和 Hexagon 的本地服务。Windows 的 GGML Hexagon 运行还依赖 NPU 驱动，以及设备信任的目录签名所覆盖的配套 DSP 算子库。已有的配套库可通过 `GGML_HEXAGON_LIBHTP_DIR` 配置。已有签名环境可用上游的 `HEXAGON_HTP_CERT` 参与构建。[固定版本的上游 Windows 说明](https://github.com/ggml-org/llama.cpp/blob/e412c6f468b7b9e0f16f2540244236f8ad68e9ae/docs/backend/snapdragon/windows.md)
 
