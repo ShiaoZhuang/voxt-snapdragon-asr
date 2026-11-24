@@ -19,7 +19,7 @@ QNN 的 28 层回放已在骁龙验收通过。当前固定入口默认只测整
 
 ## GGML Hexagon 音频转录
 
-脚本先查找现有 Hexagon SDK。找不到时下载 llama.cpp 指南列出的 Windows ARM64 Hexagon SDK Community Edition 6.7.0.0（约 900 MB），校验发布包的 SHA-256，解压到 `build/win-arm64-native/sdk/hexagon`，并在这次构建中传入 SDK 路径。下次会复用该目录。下载或构建受阻时，固定命令仍会用本机 OpenCL 构建测 Adreno。[上游 SDK 发行页](https://github.com/snapdragon-toolchain/hexagon-sdk/releases/tag/v6.7.0.0)
+脚本先查找现有 Hexagon SDK。找不到时下载 llama.cpp 指南列出的 Windows ARM64 Hexagon SDK Community Edition 6.7.0.0（约 900 MB），校验发布包的 SHA-256，解压到 `build/win-arm64-native/sdk/hexagon`，并在这次构建中传入 SDK 路径。下次会复用该目录。curl 下载失败后，脚本会用 PowerShell 的网络设置重试同一发布包。默认 Downloads 或 SDK 缓存目录里的同名发布包可直接校验和解压。下载或构建受阻时，固定命令仍会用本机 OpenCL 构建测 Adreno。[上游 SDK 发行页](https://github.com/snapdragon-toolchain/hexagon-sdk/releases/tag/v6.7.0.0)
 
 脚本在独立目录编译同时启用 OpenCL 和 Hexagon 的本地服务。Windows 的 GGML Hexagon 运行还依赖 NPU 驱动，以及设备信任的目录签名所覆盖的配套 DSP 算子库。已有的配套库可通过 `GGML_HEXAGON_LIBHTP_DIR` 配置。已有签名环境可用上游的 `HEXAGON_HTP_CERT` 参与构建。[固定版本的上游 Windows 说明](https://github.com/ggml-org/llama.cpp/blob/e412c6f468b7b9e0f16f2540244236f8ad68e9ae/docs/backend/snapdragon/windows.md)
 

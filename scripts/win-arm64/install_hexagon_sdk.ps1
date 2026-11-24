@@ -28,20 +28,55 @@ if (Test-HexagonSdk $sdk) {
     return $sdk
 }
 
-$curl = (Get-Command curl.exe -CommandType Application).Source
 $tar = (Get-Command tar.exe -CommandType Application).Source
+$archiveName = ([uri]$Release.url).Segments[-1]
+$localArchive = Join-Path $cache $archiveName
+$archive = $localArchive
+if (!(Test-Path -LiteralPath $archive -PathType Leaf) -and $env:USERPROFILE) {
+    $downloads = Join-Path $env:USERPROFILE "Downloads/$archiveName"
+    if (Test-Path -LiteralPath $downloads -PathType Leaf) { $archive = $downloads }
+}
 $stage = (New-Item -ItemType Directory -Path (Join-Path $cache ('.download-' + [guid]::NewGuid()))).FullName
 try {
-    $archive = Join-Path $stage 'hexagon-sdk.tar.xz'
     $unpacked = (New-Item -ItemType Directory -Path (Join-Path $stage 'unpacked')).FullName
 
-    Write-Host "Downloading Hexagon SDK $($Release.version) for Windows ARM64 (about 900 MB)."
-    $downloadArgs = @('--proto', '=https', '--proto-redir', '=https', '--fail', '--location', '--silent', '--show-error',
-        '--retry', '2', '--retry-max-time', '900', '--connect-timeout', '20', '--max-time', '900', '--output', $archive, $Release.url)
-    & $curl @downloadArgs | Out-Host
-    if ($LASTEXITCODE -ne 0) { throw "Hexagon SDK download failed (curl exit $LASTEXITCODE)." }
+    if (Test-Path -LiteralPath $archive -PathType Leaf) {
+        Write-Host "Using local Hexagon SDK archive at $archive."
+    } else {
+        $archive = Join-Path $stage $archiveName
+        Write-Host "Downloading Hexagon SDK $($Release.version) for Windows ARM64 (about 900 MB)."
+        $curl = Get-Command curl.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+        $curlFailure = 'curl.exe unavailable'
+        if ($curl) {
+            $curlErrors = Join-Path $stage 'curl.stderr.log'
+            $downloadArgs = @('--proto', '=https', '--proto-redir', '=https', '--fail', '--location', '--silent', '--show-error',
+                '--retry', '2', '--retry-max-time', '900', '--connect-timeout', '20', '--max-time', '900',
+                '--stderr', $curlErrors, '--output', $archive, $Release.url)
+            & $curl.Source @downloadArgs | Out-Host
+            if ($LASTEXITCODE -eq 0) {
+                $curlFailure = $null
+            } else {
+                $curlFailure = "curl exit $LASTEXITCODE"
+                if (Test-Path -LiteralPath $curlErrors -PathType Leaf) {
+                    $detail = Get-Content -LiteralPath $curlErrors -Tail 1
+                    if ($detail) { $curlFailure += " ($detail)" }
+                }
+            }
+        }
+        if ($curlFailure) {
+            Write-Host "Retrying with PowerShell and Windows network settings after $curlFailure."
+            if (Test-Path -LiteralPath $archive) { Remove-Item -LiteralPath $archive -Force }
+            try {
+                $ProgressPreference = 'SilentlyContinue'
+                Invoke-WebRequest -Uri $Release.url -UseBasicParsing -OutFile $archive -TimeoutSec 900 -MaximumRedirection 5
+            } catch {
+                $detail = $_.Exception.GetBaseException().Message
+                throw "Hexagon SDK download failed. $curlFailure. PowerShell: $detail. A downloaded $archiveName can be placed in Downloads or at $localArchive."
+            }
+        }
+    }
     if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ne $Release.sha256) {
-        throw 'Hexagon SDK download SHA-256 mismatch.'
+        throw "Hexagon SDK SHA-256 mismatch for $archive."
     }
 
     Write-Host 'Extracting the verified Hexagon SDK.'

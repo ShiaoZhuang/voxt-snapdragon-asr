@@ -1,7 +1,7 @@
 # Voxt 骁龙 Windows ARM64 本地 ASR
 status: in-progress
 
-current_handoff: [HANDOFF-20261123-211941-voxt-snapdragon-asr.md](HANDOFF-20261123-211941-voxt-snapdragon-asr.md)
+current_handoff: [HANDOFF-20261123-213437-voxt-snapdragon-asr.md](HANDOFF-20261123-213437-voxt-snapdragon-asr.md)
 
 ## 目标与边界
 保留 Voxt 交互和协议，从干净上游构建 Qwen3-ASR 1.7B + DFlash。旧骁龙原型只提供性能现象参考。
@@ -42,10 +42,11 @@ current_handoff: [HANDOFF-20261123-211941-voxt-snapdragon-asr.md](HANDOFF-202611
 - [x] 用相同输入在骁龙实测 Q8 批 8、批 4、逐行、FP32 和 QNN HTP 的末层投影与 Top‑1。
 - [x] 骁龙 28 层 QNN Target replay 按新门槛通过，记录 81.59 ms 与设备执行证据。
 - [x] 固定入口补装缺失的 Windows ARM64 Hexagon SDK，验证缓存与失败后的 Adreno 基线。
+- [x] 骁龙实测 Adreno Target-only 3.76 tok/s 与 Q4 DFlash 4.12 tok/s。
 - [ ] 骁龙本地实测 GGML Hexagon Target 的执行、转录 token 和请求 tok/s。
 - [ ] 完成 Hexagon Target 验证前向的实机可行性与性能报告。
 - [ ] 验收 Windows 桌面听写与实时接口。
 ## Current State
-固定入口已接入 Hexagon SDK 自动安装与 TPS 对照，待骁龙实测。
+Adreno 两组实机测速完成，已补 Hexagon SDK 下载重试与本地包支持。
 ## 依赖与下一步
-骁龙结果依赖离线实机交接。下一步：用骁龙原固定命令验证首次自动安装、四组请求 tok/s、同模式倍率及 DSP 请求执行证据。
+骁龙结果依赖离线实机交接。下一步：骁龙用原固定入口确认 SDK 下载重试或本地包安装，随后取得 GGML 的 DSP 执行证据和请求 tok/s。
