@@ -1,7 +1,7 @@
 --- a/tools/server/CMakeLists.txt
 +++ b/tools/server/CMakeLists.txt
 @@ -76,3 +76,13 @@
- 
+
  target_link_libraries(${TARGET} PRIVATE llama-server-impl)
  target_compile_features(${TARGET} PRIVATE cxx_std_17)
 +
@@ -23,16 +23,16 @@
 +    int32_t audio_channels; // audio: source channel count
  };
  typedef struct mtmd_helper_media_meta mtmd_helper_media_meta;
- 
+
 --- a/tools/mtmd/mtmd-helper.cpp
 +++ b/tools/mtmd/mtmd-helper.cpp
 @@ -941,7 +941,7 @@
  }
- 
+
  int32_t mtmd_helper_get_media_meta(const unsigned char * buf, size_t len, mtmd_helper_init_opt opt, mtmd_helper_media_meta * out) {
 -    *out = {MTMD_HELPER_MEDIA_TYPE_UNKNOWN, 0, 0, 0, -1.0f, -1};
 +    *out = {MTMD_HELPER_MEDIA_TYPE_UNKNOWN, 0, 0, 0, -1.0f, -1, 0};
- 
+
      if (audio_helpers::is_audio_file((const char *) buf, len)) {
          // zero channels and rate: the source format, so the length comes from the header (or an mp3 frame scan)
 @@ -956,6 +956,7 @@
@@ -51,25 +51,25 @@
       */
 -    void start_loop(int64_t idle_sleep_ms = -1);
 +    void start_loop(int64_t idle_sleep_ms = -1, const std::function<void()> & started = {});
- 
+
      // while waiting for work() to finish, run process_new_tasks on the worker thread
      // returns once work() is done (may throw exceptions)
 @@ -186,7 +186,7 @@
- 
+
      // same as recv(), but have timeout in seconds
      // if timeout is reached, nullptr is returned
 -    server_task_result_ptr recv_with_timeout(const std::unordered_set<int> & id_tasks, int timeout);
 +    server_task_result_ptr recv_with_timeout(const std::unordered_set<int> & id_tasks, std::chrono::milliseconds timeout);
- 
+
      // single-task version of recv()
      server_task_result_ptr recv(int id_task);
 @@ -235,7 +235,7 @@
- 
+
      // return nullptr if should_stop() is true before receiving a result
      // note: if one error is received, it will stop further processing and return error result
 -    server_task_result_ptr next(const std::function<bool()> & should_stop);
 +    server_task_result_ptr next(const std::function<bool()> & should_stop, std::chrono::milliseconds timeout = {});
- 
+
      struct batch_response {
          bool is_terminated = false; // if true, indicates that processing was stopped before all results were received
 --- a/tools/server/server-queue.cpp
@@ -77,12 +77,12 @@
 @@ -280,7 +280,7 @@
      }
  }
- 
+
 -void server_queue::start_loop(int64_t idle_sleep_ms) {
 +void server_queue::start_loop(int64_t idle_sleep_ms, const std::function<void()> & started) {
      running = true;
      time_last_task = ggml_time_ms();
- 
+
 @@ -290,6 +290,9 @@
      worker.busy     = false;
      worker.yielding = false;
@@ -90,22 +90,22 @@
 +    if (started) {
 +        started();
 +    }
- 
+
      constexpr auto max_wait_time = std::chrono::seconds(1);
      auto should_sleep = [&]() -> bool {
 @@ -452,8 +455,8 @@
      // should never reach here
  }
- 
+
 -server_task_result_ptr server_response::recv_with_timeout(const std::unordered_set<int> & id_tasks, int timeout) {
 -    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(timeout);
 +server_task_result_ptr server_response::recv_with_timeout(const std::unordered_set<int> & id_tasks, std::chrono::milliseconds timeout) {
 +    const auto deadline = std::chrono::steady_clock::now() + timeout;
      while (true) {
          std::unique_lock<std::mutex> lock(mutex_results);
- 
+
 @@ -553,9 +556,12 @@
- 
+
  // return nullptr if should_stop() is true before receiving a result
  // note: if one error is received, it will stop further processing and return error result
 -server_task_result_ptr server_response_reader::next(const std::function<bool()> & should_stop) {
@@ -134,19 +134,19 @@
 +++ b/tools/server/server-context.h
 @@ -73,7 +73,7 @@
      bool load_model(common_params & params);
- 
+
      // this function will block main thread until termination
 -    void start_loop();
 +    void start_loop(const std::function<void()> & started = {});
- 
+
      // terminate main loop (will unblock start_loop)
      void terminate();
 @@ -105,6 +105,7 @@
      server_routes(const common_params & params, server_context & ctx_server);
- 
+
      void init_routes();
 +    server_http_res_ptr voxt_transcriptions(const server_http_req & req, const std::atomic<bool> & stopping);
- 
+
      // note: this is not thread-safe and can only when ctx_http.is_ready is false
      void update_meta(const server_context & ctx_server) {
 --- a/tools/server/server-task.h
@@ -154,29 +154,31 @@
 @@ -81,6 +81,11 @@
      bool return_tokens   = false;
      bool return_progress = false;
- 
+
 +    bool voxt_final = false;
 +    bool voxt_stop_on_loop = false;
 +    llama_token voxt_eos = LLAMA_TOKEN_NULL;
 +    llama_token voxt_eot = LLAMA_TOKEN_NULL;
 +
      int32_t sse_ping_interval = 30; // seconds between SSE comment pings while the stream stays silent, -1 disables
- 
+
      int32_t n_keep    =  0; // number of tokens to keep from initial prompt
 --- a/tools/server/server-common.h
 +++ b/tools/server/server-common.h
-@@ -447,6 +447,11 @@
+@@ -447,6 +447,12 @@
      uint64_t n_draft_tokens      = 0;
      uint64_t n_draft_accepted    = 0;
      uint64_t n_draft_verif_steps = 0;
 +
 +    int64_t voxt_draft_microseconds   = 0;
 +    int64_t voxt_verify_microseconds  = 0;
++    int32_t voxt_live_verify_rounds   = 0;
 +    int64_t voxt_context_microseconds = 0;
 +    std::vector<json> voxt_first_rounds;
- 
+
      // these are absolute timestamps (in us)
      // note: must be signed - they are subtracted before the later ones are set
+diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
 --- a/tools/server/server-context.cpp
 +++ b/tools/server/server-context.cpp
 @@ -1,4 +1,9 @@
@@ -208,7 +210,7 @@
 @@ -2207,7 +2214,17 @@
              }
          }
- 
+
 -        if (llama_vocab_is_eog(vocab, result.tok)) {
 +        const auto & task_params = slot.task->params;
 +        const bool terminal = task_params.voxt_final
@@ -223,9 +225,9 @@
 +        if (terminal) {
              slot.stop           = STOP_TYPE_EOS;
              slot.has_next_token = false;
- 
+
 @@ -3879,9 +3896,20 @@
- 
+
          // generate the actual drafts (if any)
          if (!drafting.empty()) {
 +            const bool profile = voxt_profile_enabled() && drafting.size() == 1 &&
@@ -243,33 +245,45 @@
 +                drafting.front()->stats.voxt_draft_microseconds += draft_microseconds;
 +            }
          }
- 
+
          // make checkpoints if needed
-@@ -4644,11 +4672,38 @@
- 
+@@ -4644,11 +4672,50 @@
+
          // yield to the queue, so we can still handle metrics tasks while decoding
          // note: the sync is done here too, so that the wait is also covered by the yield
 +        const bool voxt_profile = voxt_profile_enabled();
 +        server_slot * voxt_verify_slot = nullptr;
-+        if ((voxt_profile || voxt_capture.enabled()) && slots.size() == 1) {
++        const bool voxt_live_verify = [] {
++            const char * directory = std::getenv("VOXT_QNN_VERIFY_DIR");
++            return directory && *directory;
++        }();
++        if ((voxt_profile || voxt_capture.enabled() || voxt_live_verify) && slots.size() == 1) {
 +            auto & slot = slots.front();
 +            if (slot.task && slot.task->params.voxt_final && !slot.spec_i_batch.empty()) {
 +                voxt_verify_slot = &slot;
 +            }
 +        }
-+        const bool capture = voxt_capture.enabled() && voxt_verify_slot &&
++        const bool full_verify = voxt_verify_slot &&
 +            batch.view.size() == voxt_verify_capture::positions &&
 +            voxt_verify_slot->spec_i_batch.size() == voxt_verify_capture::positions &&
 +            voxt_verify_slot->spec_i_batch.front() == off;
++        const bool capture = voxt_capture.enabled() && full_verify;
          int ret = 0;
          queue_tasks.yield_to_queue([&]() {
 +            const int64_t start = voxt_profile && voxt_verify_slot ? ggml_time_us() : 0;
 +            if (capture) {
 +                voxt_capture.begin();
 +            }
++            struct verification_scope {
++                explicit verification_scope(bool active) { llama_voxt_verify_active(active); }
++                ~verification_scope() { llama_voxt_verify_active(false); }
++            } verify_on_htp(voxt_live_verify && full_verify);
              ret = llama_process(ctx_tgt, LLAMA_PROCESS_TYPE_DECODE, batch.view.get());
              if (ret == 0 && has_output) {
                  llama_synchronize(ctx_tgt);
++                if (voxt_live_verify && full_verify) {
++                    voxt_verify_slot->stats.voxt_live_verify_rounds++;
++                }
 +                if (voxt_profile && voxt_verify_slot) {
 +                    voxt_verify_slot->stats.voxt_verify_microseconds += ggml_time_us() - start;
 +                }
@@ -283,8 +297,8 @@
 +                voxt_capture.finish(ret == 0, tokens, positions);
              }
          });
- 
-@@ -4711,7 +4766,12 @@
+
+@@ -4711,7 +4778,12 @@
          if (spec) {
              bool ok = true;
              queue_tasks.yield_to_queue([&]() {
@@ -295,12 +309,12 @@
 +                    voxt_verify_slot->stats.voxt_context_microseconds += ggml_time_us() - start;
 +                }
              });
- 
+
              if (!ok) {
-@@ -4953,6 +5013,14 @@
+@@ -4953,6 +5025,14 @@
                      SLT_INF(slot, "accepted %2zu/%2zu draft tokens\n", accepted.size() - 1, n_draft);
                  }
- 
+
 +                if (slot.task->params.voxt_final && voxt_trace_enabled() &&
 +                    slot.stats.voxt_first_rounds.size() < 3) {
 +                    slot.stats.voxt_first_rounds.push_back({
@@ -310,27 +324,27 @@
 +                    });
 +                }
                  common_speculative_accept(spec.get(), slot.id, accepted.size() - 1);
- 
+
                  slot.spec_draft = std::move(accepted);
-@@ -5156,9 +5224,9 @@
+@@ -5156,9 +5236,9 @@
      return impl->load_model(params);
  }
- 
+
 -void server_context::start_loop() {
 +void server_context::start_loop(const std::function<void()> & started) {
      auto & params = impl->params_base;
 -    impl->queue_tasks.start_loop(params.sleep_idle_seconds * 1000);
 +    impl->queue_tasks.start_loop(params.sleep_idle_seconds * 1000, started);
  }
- 
+
  void server_context::terminate() {
-@@ -5271,6 +5339,8 @@
+@@ -5271,6 +5351,8 @@
  //
  // server_routes
  //
 +
 +#include "transcriptions.inc"
- 
+
  std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
              const server_http_req & req,
 --- a/ggml/src/ggml-opencl/ggml-opencl.cpp
@@ -342,12 +356,12 @@
 +    size_t max_alloc_size = 0;
 +    cl_uint alignment = 0;
  };
- 
+
  // Lazily-compiled flash-attention kernels and their per-(dk,dv) tile metadata.
 @@ -9254,6 +9256,16 @@
- 
+
      clGetDeviceInfo(dev_ctx->device, CL_DEVICE_GLOBAL_MEM_SIZE, sizeof(size_t), &dev_ctx->global_mem_size, NULL);
- 
+
 +    // Buffer sizing can run before a command queue or its backend context exists.
 +    cl_uint base_align_in_bits;
 +    CL_CHECK(clGetDeviceInfo(dev_ctx->device, CL_DEVICE_MEM_BASE_ADDR_ALIGN, sizeof(base_align_in_bits), &base_align_in_bits, NULL));
@@ -364,7 +378,7 @@
 @@ -9359,14 +9371,10 @@
      backend_ctx->has_integer_dot =
          strstr(ext_buffer.data(), "cl_khr_integer_dot_product") != NULL;
- 
+
 -    cl_uint base_align_in_bits;
 -    CL_CHECK(clGetDeviceInfo(device, CL_DEVICE_MEM_BASE_ADDR_ALIGN, sizeof(cl_uint), &base_align_in_bits, NULL));
 -    GGML_ASSERT(base_align_in_bits % 8u == 0);
@@ -380,13 +394,13 @@
      CL_CHECK(clGetDeviceInfo(device, CL_DEVICE_IMAGE2D_MAX_WIDTH, sizeof(size_t), &backend_ctx->image2d_max_width, NULL));
      CL_CHECK(clGetDeviceInfo(device, CL_DEVICE_IMAGE2D_MAX_HEIGHT, sizeof(size_t), &backend_ctx->image2d_max_height, NULL));
 @@ -17846,16 +17854,12 @@
- 
+
  static size_t ggml_backend_opencl_buffer_type_get_alignment(ggml_backend_buffer_type_t buffer_type) {
      ggml_backend_opencl_device_context * dev_ctx = (ggml_backend_opencl_device_context *) buffer_type->device->context;
 -    return dev_ctx->backend_ctx->alignment;
 +    return dev_ctx->alignment;
  }
- 
+
  static size_t ggml_backend_opencl_buffer_type_get_max_size(ggml_backend_buffer_type_t buffer_type) {
 -    static size_t max_size = -1;
 -    if (max_size == (size_t)-1) {
@@ -397,7 +411,7 @@
 +    ggml_backend_opencl_device_context * dev_ctx = (ggml_backend_opencl_device_context *) buffer_type->device->context;
 +    return dev_ctx->max_alloc_size;
  }
- 
+
  static bool ggml_backend_opencl_buffer_type_supports_backend(ggml_backend_buffer_type_t buft, ggml_backend_t backend) {
 @@ -17876,7 +17880,7 @@
      // carve slack: at most 5 components (q5_K), i.e. 4 aligned gaps.
@@ -408,3 +422,77 @@
      }
  #endif // GGML_OPENCL_SOA_Q
      return size;
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -67,6 +67,10 @@
+
+ target_include_directories(llama PRIVATE . ${CMAKE_CURRENT_BINARY_DIR})
+ target_include_directories(llama PUBLIC ../include)
++if (LLAMA_VOXT_SOURCE)
++    target_include_directories(llama PRIVATE "${LLAMA_VOXT_SOURCE}")
++    target_compile_definitions(llama PRIVATE LLAMA_VOXT_LIVE_VERIFY)
++endif()
+ target_compile_features   (llama PRIVATE cxx_std_17) # don't bump
+
+ find_package(Threads REQUIRED)
+diff --git a/include/llama.h b/include/llama.h
+--- a/include/llama.h
++++ b/include/llama.h
+@@ -1132,6 +1132,8 @@
+     // This is automatically done when using one of the functions below to obtain the computation results
+     // and is not necessary to call it explicitly in most cases
+     LLAMA_API void llama_synchronize(struct llama_context * ctx);
++    // Scoped to the thread running a Voxt DFlash verification batch.
++    LLAMA_API void llama_voxt_verify_active(bool active);
+
+     // Token logits obtained from the last call to llama_decode()
+     // The logits for which llama_batch.logits[i] != 0 are stored contiguously
+diff --git a/src/llama-context.cpp b/src/llama-context.cpp
+--- a/src/llama-context.cpp
++++ b/src/llama-context.cpp
+@@ -22,6 +22,19 @@
+ #include <stdexcept>
+ #include <string>
+ #include <unordered_map>
++
++#ifdef LLAMA_VOXT_LIVE_VERIFY
++#include "live_verify.h"
++static thread_local bool voxt_verify_active = false;
++#endif
++
++void llama_voxt_verify_active(bool active) {
++#ifdef LLAMA_VOXT_LIVE_VERIFY
++    voxt_verify_active = active;
++#else
++    GGML_UNUSED(active);
++#endif
++}
+
+ //
+ // llama_context
+@@ -1871,6 +1884,24 @@
+         //LLAMA_LOG_INFO("graph set inputs time: %.3f ms\n", (ggml_time_us() - t_start_us)/1000.0);
+     }
+
++#ifdef LLAMA_VOXT_LIVE_VERIFY
++    if (voxt_verify_active) {
++        try {
++            voxt_live::require(model.arch == LLM_ARCH_QWEN3VL && model.hparams.n_layer() == voxt_live::layers &&
++                ubatch.n_tokens == voxt_live::rows && ubatch.n_seqs_unq == 1 && ubatch.token && !ubatch.is_mixed() &&
++                n_outputs == voxt_live::rows && !cparams.embeddings && !cparams.embeddings_layer_inp_dev &&
++                sampling.samplers.empty(), "unsupported live verification batch or context");
++            ggml_backend_sched_synchronize(sched.get());
++            voxt_live::verify(res, ubatch);
++            ret = GGML_STATUS_SUCCESS;
++            return res;
++        } catch (const std::exception & error) {
++            LLAMA_LOG_ERROR("voxt: live Target verification failed: %s\n", error.what());
++            ret = GGML_STATUS_FAILED;
++            return nullptr;
++        }
++    }
++#endif
+     const auto status = graph_compute(res->get_gf(), ubatch.n_tokens > 1);
+     if (status != GGML_STATUS_SUCCESS) {
+         LLAMA_LOG_ERROR("%s: failed to compute graph, compute status: %d\n", __func__, status);

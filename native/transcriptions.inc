@@ -79,6 +79,7 @@ static json voxt_done(server_task_result_cmpl_final & final, const llama_vocab *
                {"language", language.empty() ? json(nullptr) : json(language)},
                {"finish_reason", final.stop == STOP_TYPE_LIMIT ? "length" : "stop"},
                {"verify_round_count", stats.n_draft_verif_steps},
+               {"live_verify_round_count", stats.voxt_live_verify_rounds},
                {"proposed_draft_token_count", stats.n_draft_tokens},
                {"accepted_draft_token_count", stats.n_draft_accepted}};
         if (voxt_trace_enabled()) {

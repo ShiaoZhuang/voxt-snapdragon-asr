@@ -13,11 +13,18 @@ if ($FullReplay) {
     return
 }
 $notes = [System.Collections.Generic.List[string]]::new()
-try {
-    & (Join-Path $PSScriptRoot 'verify_ggml_hexagon.ps1') @paths -Summary $notes
-} catch {
-    $notes.Add("GGML Hexagon: INCOMPLETE | $($_.Exception.Message)")
-    throw
-} finally {
-    $notes | Set-Content -Encoding UTF8 -LiteralPath (Join-Path $LogDirectory 'workflow_summary.txt')
+$failures = @()
+foreach ($route in @(
+    @{ Name='QNN live'; Script='verify_live_qnn.ps1' },
+    @{ Name='GGML Hexagon'; Script='verify_ggml_hexagon.ps1' }
+)) {
+    try {
+        & (Join-Path $PSScriptRoot $route.Script) @paths -Summary $notes
+    } catch {
+        $failures += $route.Name
+        $notes.Add("$($route.Name): INCOMPLETE | $($_.Exception.Message)")
+    } finally {
+        $notes | Set-Content -Encoding UTF8 -LiteralPath (Join-Path $LogDirectory 'workflow_summary.txt')
+    }
 }
+if ($failures.Count) { throw "Incomplete routes: $($failures -join ', ')." }

@@ -96,6 +96,10 @@ def rotary_tables(capture, manifest):
             rope["ext_factor"] != 0 or rope["base"] <= 0 or sum(rope["sections"]) <= 0):
         raise ValueError(f"unsupported interleaved M-RoPE settings: {rope}")
     positions = read_tensor(capture, manifest, "rope_positions").reshape(4, 8)
+    return rotary_tables_for_positions(rope, positions)
+
+
+def rotary_tables_for_positions(rope, positions):
     t, h, w, _ = rope["sections"]
     frequencies = np.arange(64)
     sector = frequencies % sum(rope["sections"])
@@ -111,7 +115,7 @@ def rotate(x, cosine, sine):
     return np.concatenate((left * cosine - right * sine, right * cosine + left * sine), axis=-1)
 
 
-def project_qkv(graph, x, weights, norms, epsilon, tables):
+def project_qkv(graph, x, weights, norms, epsilon, tables, *, live=False):
     input_norm, q_norm, k_norm = norms
     precision = np.float16 if graph else np.float32
     cosine, sine = (table.astype(precision) for table in tables)
@@ -123,6 +127,8 @@ def project_qkv(graph, x, weights, norms, epsilon, tables):
             "rope_sin": np.concatenate((-sine, sine), axis=-1),
             "rope_swap_halves": np.r_[64:128, 0:64].astype(np.int64),
         })
+        if live:
+            del graph.initializers["rope_cos"], graph.initializers["rope_sin"]
         graph.node("RMSNormalization", ["residual", "attn_input_norm_weight"], "attn_input_norm", axis=-1, epsilon=epsilon)
         graph.node("Cast", ["attn_input_norm"], "qkv_input", to=TensorProto.FLOAT)
         _, qkv_input = graph.activation("qkv_input", normalized.astype(precision))
@@ -157,11 +163,11 @@ def project_qkv(graph, x, weights, norms, epsilon, tables):
     return result
 
 
-def build_graph(feeds, weights, norm, epsilon, scale, *, front=None, fp32_attention=False, activation_code_limit=32000):
+def build_graph(feeds, weights, norm, epsilon, scale, *, front=None, fp32_attention=False, activation_code_limit=32000, live=False):
     output_weight, ffn_weights = weights
     graph = FfnGraph(activation_code_limit)
     if front:
-        qkv = project_qkv(graph, feeds["residual"], *front)
+        qkv = project_qkv(graph, feeds["residual"], *front, live=live)
     else:
         qkv = feeds
     graph.node("Concat", ["past_key", "K"], "joined_k", axis=2)
@@ -203,13 +209,18 @@ def build_graph(feeds, weights, norm, epsilon, scale, *, front=None, fp32_attent
 
     ins = [helper.make_tensor_value_info(name, TensorProto.FLOAT16, value.shape) for name, value in feeds.items()]
     outs = [helper.make_tensor_value_info("y_u16", TensorProto.UINT16, expected.shape)]
+    if live:
+        ins += [helper.make_tensor_value_info(name, TensorProto.FLOAT16, [1, 1, 8, 128])
+                for name in ("rope_cos", "rope_sin")]
+        outs += [helper.make_tensor_value_info(name, TensorProto.FLOAT16, [1, 8, 8, 128])
+                 for name in ("K", "V")]
     model = helper.make_graph(graph.nodes, "verify_layer0_full" if front else "verify_layer0_post_rope", ins, outs,
                               [numpy_helper.from_array(value, name) for name, value in graph.initializers.items()])
     return model, expected, dequantized, float(graph.initializers["y_scale"])
 
 
 def prepare(capture, target, output, *, full=False, layer=0, activation_code_limit=32000, verbose=True,
-            allow_reference_mismatch=False):
+            allow_reference_mismatch=False, live=False, live_cpu=False):
     q, k, v, mask, native_attention, scale, counts = load_attention(capture)
     residual = np.fromfile(capture / "attention_residual.f32", dtype="<f4").reshape(8, 2048)
     native = np.fromfile(capture / "layer_out.f32", dtype="<f4").reshape(8, 2048)
@@ -262,7 +273,10 @@ def prepare(capture, target, output, *, full=False, layer=0, activation_code_lim
 
     weights = (output_weight, ffn_weights)
     model, expected, dequantized, output_scale = build_graph(
-        feeds, weights, norm, epsilon, scale, front=front, activation_code_limit=activation_code_limit)
+        feeds, weights, norm, epsilon, scale, front=front, activation_code_limit=activation_code_limit, live=live,
+        fp32_attention=live_cpu)
+    if live:
+        return model, feeds, output_scale
     cpu_model, _, _, _ = build_graph(
         feeds, weights, norm, epsilon, scale, front=front, activation_code_limit=activation_code_limit, fp32_attention=True)
     output.mkdir(parents=True, exist_ok=False)

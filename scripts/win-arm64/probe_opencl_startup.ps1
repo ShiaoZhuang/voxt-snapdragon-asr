@@ -7,6 +7,7 @@ param(
     [switch]$CaptureAllLayers,
     [switch]$Transcribe,
     [string]$MetricsPath,
+    [string]$LiveVerifyDirectory,
     [switch]$Draft,
     [ValidateSet('opencl', 'hexagon')][string]$Backend = 'opencl'
 )
@@ -55,7 +56,7 @@ function Invoke-ClipProbe([int]$Port, [string]$Audio) {
             if ($MetricsPath) {
                 [ordered]@{text=$done.text; ids=@($meta.token_ids); tokens=$meta.generated_token_count;
                     wall_ms=$timer.Elapsed.TotalMilliseconds; finish=$meta.finish_reason;
-                    rounds=$meta.verify_round_count; proposed=$meta.proposed_draft_token_count} |
+                    rounds=$meta.verify_round_count; live_rounds=$meta.live_verify_round_count; proposed=$meta.proposed_draft_token_count} |
                     ConvertTo-Json -Depth 4 | Set-Content -Encoding UTF8 -LiteralPath $MetricsPath
             }
             if ($CaptureDirectory) {
@@ -130,6 +131,10 @@ function Invoke-ClipProbe([int]$Port, [string]$Audio) {
         if ($Transcribe) {
             $start.EnvironmentVariables['VOXT_ASR_TRACE'] = '1'
             $start.EnvironmentVariables['OMNI_DFLASH_PROFILE'] = '1'
+        }
+        if ($LiveVerifyDirectory) {
+            $start.EnvironmentVariables['VOXT_QNN_VERIFY_DIR'] = $LiveVerifyDirectory
+            $start.EnvironmentVariables['LLAMA_DFLASH_DEV'] = '0'
         }
         if ($CaptureDirectory) { $start.EnvironmentVariables['VOXT_VERIFY_CAPTURE_DIR'] = $CaptureDirectory }
         if ($CaptureAllLayers) { $start.EnvironmentVariables['VOXT_VERIFY_CAPTURE_ALL_LAYERS'] = '1' }
