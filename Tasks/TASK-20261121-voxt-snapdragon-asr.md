@@ -1,7 +1,7 @@
 # Voxt 骁龙 Windows ARM64 本地 ASR
 status: in-progress
 
-current_handoff: [HANDOFF-20261123-192017-voxt-snapdragon-asr.md](HANDOFF-20261123-192017-voxt-snapdragon-asr.md)
+current_handoff: [HANDOFF-20261123-210530-voxt-snapdragon-asr.md](HANDOFF-20261123-210530-voxt-snapdragon-asr.md)
 
 ## 目标与边界
 保留 Voxt 交互和协议，从干净上游构建 Qwen3-ASR 1.7B + DFlash。旧骁龙原型只提供性能现象参考。
@@ -40,10 +40,11 @@ current_handoff: [HANDOFF-20261123-192017-voxt-snapdragon-asr.md](HANDOFF-202611
 - [x] 骁龙实测已完成 28 层 HTP 串联、DFlash 辅助张量和八位置 top-1。
 - [x] 明确末层 FFN down 偏差的验收标准并验证 5% 与完整链 top-1 判定。
 - [x] 用相同输入在骁龙实测 Q8 批 8、批 4、逐行、FP32 和 QNN HTP 的末层投影与 Top‑1。
+- [x] 骁龙 28 层 QNN Target replay 按新门槛通过，记录 81.59 ms 与设备执行证据。
 - [ ] 骁龙本地实测 GGML Hexagon Target 的执行、转录 token 和请求 tok/s。
 - [ ] 完成 Hexagon Target 验证前向的实机可行性与性能报告。
 - [ ] 验收 Windows 桌面听写与实时接口。
 ## Current State
-骁龙末层 Q8 批量路径复现偏差，八位置 Top‑1 全部一致；双路线转录待实测。
+QNN 28 层实机回放通过，GGML Hexagon 尚待定位或安装 SDK。
 ## 依赖与下一步
-骁龙结果依赖离线实机交接。下一步：在骁龙仓库根目录运行已有固定入口，取得已发布的 7243740 双路线报告及请求 tok/s。
+骁龙结果依赖离线实机交接。下一步：骁龙固定入口测同一音频的 Adreno 与 Hexagon 请求 tok/s；若仍缺 SDK，按报告的查找路径配置 6.7+ 后复测。

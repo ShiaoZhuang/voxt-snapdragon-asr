@@ -115,16 +115,8 @@ $null = New-Item -ItemType Directory -Path (Join-Path $build 'src') -Force
 $product = $build
 if ($Hexagon) {
     $product = Join-Path $build 'hexagon'
-    $sdk = $env:HEXAGON_SDK_ROOT
-    if (!$sdk) {
-        $candidate = Get-ChildItem -Path "$($env:SystemDrive)/Qualcomm/Hexagon_SDK/*" -Directory -ErrorAction SilentlyContinue |
-            Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'build/cmake/hexagon_fun.cmake') } |
-            Sort-Object LastWriteTime -Descending | Select-Object -First 1
-        if ($candidate) { $sdk = $candidate.FullName }
-    }
-    if (!$sdk -or !(Test-Path -LiteralPath (Join-Path $sdk 'build/cmake/hexagon_fun.cmake'))) {
-        throw 'Hexagon SDK unavailable. Configure the installed Hexagon SDK 6.7+ with HEXAGON_SDK_ROOT.'
-    }
+    $sdk = & (Join-Path $PSScriptRoot 'find_hexagon_sdk.ps1')
+    Write-Host "Hexagon SDK: $sdk"
 }
 $bin = (New-Item -ItemType Directory -Path (Join-Path $product 'bin') -Force).FullName
 $lock = Get-Content -Raw -LiteralPath (Join-Path $root 'sources.lock.json') | ConvertFrom-Json

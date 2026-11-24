@@ -7,14 +7,23 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $Summary.Add('GGML Hexagon | zh-plain-1 | target on HTP0, audio and optional Q4 draft on Adreno')
-& (Join-Path $PSScriptRoot 'build_native.ps1') -BuildDirectory $BuildDirectory -BackendOnly -Hexagon | Out-Host
-$product = Join-Path $BuildDirectory 'hexagon'
-$Summary.Add('GGML Hexagon native Windows build: PASS')
-
-# Use the same local dual-backend executable for all four comparisons.
-$baseline = $null
+& (Join-Path $PSScriptRoot 'verify_replay_assets.ps1') -InstallDirectory $InstallDirectory
 $failed = @()
-foreach ($name in @('adreno-target', 'adreno-draft', 'hexagon-target', 'hexagon-draft')) {
+$cases = @('adreno-target', 'adreno-draft')
+try {
+    & (Join-Path $PSScriptRoot 'build_native.ps1') -BuildDirectory $BuildDirectory -BackendOnly -Hexagon | Out-Host
+    $product = Join-Path $BuildDirectory 'hexagon'
+    $Summary.Add('GGML Hexagon native Windows build: PASS')
+    $cases += 'hexagon-target', 'hexagon-draft'
+} catch {
+    $failed += 'Hexagon build'
+    $Summary.Add("GGML Hexagon build blocked | $($_.Exception.Message)")
+    $Summary.Add('Running both Adreno measurements with the local OpenCL build.')
+    & (Join-Path $PSScriptRoot 'build_native.ps1') -BuildDirectory $BuildDirectory -BackendOnly | Out-Host
+    $product = $BuildDirectory
+}
+$baseline = $null
+foreach ($name in $cases) {
     $path = Join-Path $LogDirectory "$name.txt"
     $backend = if ($name -like 'adreno-*') { 'opencl' } else { 'hexagon' }
     $draft = $name -like '*-draft'
@@ -53,4 +62,4 @@ foreach ($name in @('adreno-target', 'adreno-draft', 'hexagon-target', 'hexagon-
         $Summary.Add("${name}: FAIL | $($_.Exception.Message)")
     }
 }
-if ($failed.Count) { throw "See $($failed -join ', ') logs. Windows requires matching trusted GGML HTP ops." }
+if ($failed.Count) { throw "Incomplete steps: $($failed -join ', '). See the details above." }

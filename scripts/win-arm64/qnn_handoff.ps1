@@ -157,14 +157,7 @@ sys.exit(0 if platform == 'win-arm64' and sys.implementation.name == 'cpython' a
     $summary.Add('QNN Python dependencies: PASS')
 
     $stage = 'Replay assets'
-    $assets = Get-Content -Raw -LiteralPath (Join-Path $InstallDirectory 'verify_manifest.json') | ConvertFrom-Json
-    foreach ($relative in @('models/target.gguf', 'models/mmproj.gguf', 'models/draft-4.gguf', 'eval/zh-plain-1.wav')) {
-        $path = Join-Path $InstallDirectory $relative
-        $expectedHash = $assets.files.$relative
-        if (!$expectedHash -or (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -ne $expectedHash) {
-            throw "SHA-256 mismatch: $relative"
-        }
-    }
+    & (Join-Path $PSScriptRoot 'verify_replay_assets.ps1') -InstallDirectory $InstallDirectory
     $summary.Add('Installed model and clip hashes: PASS')
 
     $stage = 'Native build'

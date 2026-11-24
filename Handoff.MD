@@ -15,11 +15,11 @@ git switch --detach veri-1-auto-handoff
 .\scripts\win-arm64\update_and_verify.ps1
 ```
 
-固定入口会在本机依次尝试 QNN 的 28 层回放和 GGML Hexagon 的整条音频转录。两条路线独立报告。请拍最后的 **VOXT SNAPDRAGON REPORT**，若一屏放不下，请分两张。无需重跑 31 条 CPU 基准。
+QNN 的 28 层回放已在骁龙验收通过。当前固定入口默认只测整条音频转录。GGML Hexagon 构建受阻时会记录具体原因，并用本地 OpenCL 服务继续完成两组 Adreno 测速。请拍最后的 **VOXT SNAPDRAGON REPORT**，若一屏放不下，请分两张。无需重跑 31 条 CPU 基准。
 
 ## GGML Hexagon 音频转录
 
-脚本在独立目录编译同时启用 OpenCL 和 Hexagon 的本地服务。它按已配置的 `HEXAGON_SDK_ROOT` 或标准安装目录查找 Hexagon SDK 6.7+，与现有 Visual Studio ARM64 工具链配合使用。Windows 需要与此版 GGML 接口匹配、由设备信任的目录签名覆盖的 DSP 算子库。若 IT 已提供这些库，可通过上游的 `GGML_HEXAGON_LIBHTP_DIR` 指向配套目录。若开发环境已显式配置上游专用的 `HEXAGON_HTP_CERT`，CMake 会按上游流程构建算子及签名目录。SDK 缺失、驱动加载失败或缺少执行记录都会写入摘要。[固定版本的上游 Windows 说明](https://github.com/ggml-org/llama.cpp/blob/e412c6f468b7b9e0f16f2540244236f8ad68e9ae/docs/backend/snapdragon/windows.md)
+脚本在独立目录编译同时启用 OpenCL 和 Hexagon 的本地服务。它读取进程、用户及系统的 `HEXAGON_SDK_ROOT`，也检查已有 `HEXAGON_TOOLS_ROOT` 的上级目录和系统盘、Program Files 下的 Qualcomm 安装目录来定位 Hexagon SDK 6.7+，与现有 Visual Studio ARM64 工具链配合使用。Windows 需要与此版 GGML 接口匹配、由设备信任的目录签名覆盖的 DSP 算子库。若 IT 已提供这些库，可通过上游的 `GGML_HEXAGON_LIBHTP_DIR` 指向配套目录。若开发环境已显式配置上游专用的 `HEXAGON_HTP_CERT`，CMake 会按上游流程构建算子及签名目录。SDK 缺失、驱动加载失败或缺少执行记录都会写入摘要。[固定版本的上游 Windows 说明](https://github.com/ggml-org/llama.cpp/blob/e412c6f468b7b9e0f16f2540244236f8ad68e9ae/docs/backend/snapdragon/windows.md)
 
 对同一条 `zh-plain-1.wav`，脚本分别运行 Adreno 和 HTP0 Target，每种设备各测 Target-only 和 Q4 DFlash。音频投影及可选草稿都在 Adreno。每个测试启动独立服务，比对 Adreno Target-only 的完整 token 序列和转录文本。GGML Hexagon 还要求请求开始后出现有非零周期的 DSP 算子记录。GGML 调度器可能将部分计算放在主机上。每个测试的 `.txt` 保存原始日志，`.metrics.json` 保存文本、token 和计时。摘要中的 request tok/s 使用生成 token 数（排除 EOS）除以 HTTP 请求时间，包括音频预填充和解码，排除启动加载时间。HTP 测试打开了设备 profiling。
 
