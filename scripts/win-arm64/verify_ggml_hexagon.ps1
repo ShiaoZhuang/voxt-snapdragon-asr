@@ -43,7 +43,8 @@ if ($hexagonBuilt) {
         if (!(Test-Path -LiteralPath (Join-Path $ops 'libggml-htp.cat') -PathType Leaf)) {
             Write-Host '[voxt] Checking the Windows certificate stores for a code-signing key.'
             $ops = & (Join-Path $PSScriptRoot 'sign_htp_catalog.ps1') -PackageDirectory $ops `
-                -TrialDirectory (Join-Path $LogDirectory 'htp-v73-self-signed') -Summary $Summary
+                -TrialDirectory (Join-Path $LogDirectory 'htp-v73-self-signed') `
+                -ToolCacheDirectory (Join-Path $BuildDirectory 'sdk/windows-signing-tools') -Summary $Summary
         }
         $Summary.Add("HTP library directory: $ops")
         $cases += 'hexagon-target', 'hexagon-draft'

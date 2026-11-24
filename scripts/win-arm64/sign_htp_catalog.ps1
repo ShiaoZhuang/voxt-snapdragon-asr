@@ -2,6 +2,7 @@
 param(
     [Parameter(Mandatory)][string]$PackageDirectory,
     [Parameter(Mandatory)][string]$TrialDirectory,
+    [Parameter(Mandatory)][string]$ToolCacheDirectory,
     [Parameter(Mandatory)][AllowEmptyCollection()][System.Collections.Generic.List[string]]$Summary
 )
 
@@ -14,6 +15,7 @@ if (Test-Path -LiteralPath $catalog -PathType Leaf) { return $package }
 function Invoke-SigningTool([string]$Tool, [string[]]$Arguments, [int]$TimeoutSeconds) {
     $start = [Diagnostics.ProcessStartInfo]::new($Tool)
     $start.Arguments = ($Arguments | ForEach-Object { '"' + ($_ -replace '(\\+)$', '$1$1') + '"' }) -join ' '
+    $start.WorkingDirectory = Split-Path -Parent $Tool
     $start.UseShellExecute = $false
     $start.CreateNoWindow = $true
     $start.RedirectStandardOutput = $true
@@ -46,7 +48,57 @@ function Find-WindowsKitTool([string]$Name) {
             if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
         }
     }
-    throw "$Name was not found in PATH or the installed Windows SDK/WDK."
+}
+
+function Get-NuGetSigningTool([string]$Tool, $Release) {
+    $cache = (New-Item -ItemType Directory -Path $ToolCacheDirectory -Force).FullName
+    $name = ([uri]$Release.url).Segments[-1]
+    $cached = Join-Path $cache $name
+    $archive = $cached
+    if (!(Test-Path -LiteralPath $archive -PathType Leaf) -and $env:USERPROFILE) {
+        $downloads = Join-Path $env:USERPROFILE "Downloads/$name"
+        if (Test-Path -LiteralPath $downloads -PathType Leaf) { $archive = $downloads }
+    }
+    if (!(Test-Path -LiteralPath $archive -PathType Leaf)) {
+        $curl = Get-Command curl.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+        $hint = "Place $name in Downloads or $cache."
+        if (!$curl) { throw "curl.exe not found. $hint" }
+        $partial = "$cached.partial-$([guid]::NewGuid())"
+        try {
+            Write-Host "[voxt] Downloading $Tool from Microsoft NuGet (up to 90 seconds)."
+            $result = Invoke-SigningTool $curl.Source @('--proto', '=https', '--proto-redir', '=https',
+                '--fail', '--location', '--silent', '--show-error', '--connect-timeout', '15',
+                '--max-time', '90', '--speed-limit', '1024', '--speed-time', '20', '--output', $partial, $Release.url) 90
+            if ($result.Code -ne 0) { throw "$Tool package download failed (curl exit $($result.Code)) | $($result.Detail) | $hint" }
+            if ((Get-FileHash -LiteralPath $partial -Algorithm SHA256).Hash -ne $Release.sha256) {
+                throw "SHA-256 mismatch for downloaded $name."
+            }
+            [IO.File]::Move($partial, $cached)
+        } finally {
+            if (Test-Path -LiteralPath $partial) { Remove-Item -LiteralPath $partial -Force }
+        }
+    } elseif ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ne $Release.sha256) {
+        throw "SHA-256 mismatch for $archive."
+    }
+    $destination = (New-Item -ItemType Directory -Force -Path (Join-Path (Split-Path -Parent $TrialDirectory) "windows-signing-tools/$Tool")).FullName
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $zip = [IO.Compression.ZipFile]::OpenRead($archive)
+    try {
+        foreach ($entry in $zip.Entries) {
+            if (!$entry.Name -or !$entry.FullName.StartsWith($Release.prefix, [StringComparison]::Ordinal)) { continue }
+            $relative = $entry.FullName.Substring($Release.prefix.Length)
+            if ([IO.Path]::IsPathRooted($relative) -or ($relative -split '[/\\]') -contains '..') {
+                throw "Invalid path in $name."
+            }
+            $target = Join-Path $destination $relative
+            $null = New-Item -ItemType Directory -Force -Path (Split-Path -Parent $target)
+            [IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $target, $true)
+        }
+    } finally { $zip.Dispose() }
+    $exe = Join-Path $destination $Release.executable
+    if (!(Test-Path -LiteralPath $exe -PathType Leaf)) { throw "$($Release.executable) missing from $name." }
+    $Summary.Add("HTP signing tool ($Tool): Microsoft NuGet | $name")
+    return $exe
 }
 
 $now = Get-Date
@@ -80,6 +132,11 @@ if ($kitRoot) {
 }
 $inf2cat = Find-WindowsKitTool 'Inf2Cat.exe'
 $signtool = Find-WindowsKitTool 'SignTool.exe'
+if (!$inf2cat -or !$signtool) {
+    $lock = Get-Content -LiteralPath (Join-Path $PSScriptRoot '../../sources.lock.json') -Raw | ConvertFrom-Json
+    if (!$inf2cat) { $inf2cat = Get-NuGetSigningTool 'Inf2Cat' $lock.windows_signing_tools.inf2cat }
+    if (!$signtool) { $signtool = Get-NuGetSigningTool 'SignTool' $lock.windows_signing_tools.signtool }
+}
 $windowsBuild = [int](Get-ItemPropertyValue 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' 'CurrentBuildNumber')
 $os = if ($windowsBuild -ge 26200) { '10_25H2_ARM64' } elseif ($windowsBuild -ge 26100) { '10_GE_ARM64' } else { '10_NI_ARM64' }
 

@@ -4,6 +4,20 @@
     "url": "https://github.com/snapdragon-toolchain/hexagon-sdk/releases/download/v6.7.0.0/hexagon-sdk-v6.7.0.0-arm64-wos.tar.xz",
     "sha256": "9eb256cc7b102f721365151a470a33980069a18b9209e1d56a6d2fa430369759"
   },
+  "windows_signing_tools": {
+    "inf2cat": {
+      "url": "https://api.nuget.org/v3-flatcontainer/microsoft.windows.wdk.arm64/10.0.26100.6584/microsoft.windows.wdk.arm64.10.0.26100.6584.nupkg",
+      "sha256": "e705b2a63eab891def8f98087666f93e8f21da8e3b5def81a624b83fef5bdae9",
+      "prefix": "c/bin/10.0.26100.0/x86/",
+      "executable": "Inf2Cat.exe"
+    },
+    "signtool": {
+      "url": "https://api.nuget.org/v3-flatcontainer/microsoft.windows.sdk.buildtools/10.0.26100.6584/microsoft.windows.sdk.buildtools.10.0.26100.6584.nupkg",
+      "sha256": "0fe1f6a5e83781e72a6506c94aed73f17897e0ac4421aedd13560baddd228586",
+      "prefix": "bin/10.0.26100.0/arm64/",
+      "executable": "signtool.exe"
+    }
+  },
   "opencl": {
     "headers": {
       "repo": "https://github.com/KhronosGroup/OpenCL-Headers.git",
