@@ -1,16 +1,17 @@
 # 晓龙 ASR 任务索引
-Last updated: 2026-11-23 22:54:13 US/Pacific
+Last updated: 2026-11-23 23:59:11 US/Pacific
 
 ## 项目与文档
 Voxt Windows ARM64 本地听写。[项目计划](../PLAN.md) · [跟踪协议](README.md)
 ## Active Tasks
-- [Voxt 骁龙本地 ASR](TASK-20261121-voxt-snapdragon-asr.md) — in-progress，已为 SDK 吊销检查失败上线即时显示与超时保护。
+- [Voxt 骁龙本地 ASR](TASK-20261121-voxt-snapdragon-asr.md) — in-progress，骁龙仍在调用旧启动器，已核对远端支持 Route。
 ## Source Checkpoint
-- 移植项目：experiment/real-qnn-replay @ 4df97837d66f9a50ec5886dfc5a11d312789d9e7（写入本轮检查点前）。
+- 移植项目：experiment/real-qnn-replay @ 03c5ad52c4bddcf68cdf59c02bcde7d7042a2791（写入本轮检查点前）。
 - sglang-omni：feat/dflash-profile-benchmark @ 6efb1212b6e1196ed1140040d9e4e3069f6cb0a8，Capture.swift 有已有修改。
 ## Latest checkpoint
-[HANDOFF-20261123-225413-voxt-snapdragon-asr.md](HANDOFF-20261123-225413-voxt-snapdragon-asr.md)
+[HANDOFF-20261123-235911-voxt-snapdragon-asr.md](HANDOFF-20261123-235911-voxt-snapdragon-asr.md)
 ## Handoff Registry
+- [HANDOFF-20261123-235911-voxt-snapdragon-asr.md](HANDOFF-20261123-235911-voxt-snapdragon-asr.md) → [Voxt 骁龙本地 ASR](TASK-20261121-voxt-snapdragon-asr.md)
 - [HANDOFF-20261123-225413-voxt-snapdragon-asr.md](HANDOFF-20261123-225413-voxt-snapdragon-asr.md) → [Voxt 骁龙本地 ASR](TASK-20261121-voxt-snapdragon-asr.md)
 - [HANDOFF-20261123-221309-voxt-snapdragon-asr.md](HANDOFF-20261123-221309-voxt-snapdragon-asr.md) → [Voxt 骁龙本地 ASR](TASK-20261121-voxt-snapdragon-asr.md)
 - [HANDOFF-20261123-213437-voxt-snapdragon-asr.md](HANDOFF-20261123-213437-voxt-snapdragon-asr.md) → [Voxt 骁龙本地 ASR](TASK-20261121-voxt-snapdragon-asr.md)
