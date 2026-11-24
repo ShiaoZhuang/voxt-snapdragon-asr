@@ -5,6 +5,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'windows_tool_download.ps1')
 $cache = (New-Item -ItemType Directory -Path $CacheDirectory -Force).FullName
 $sdk = Join-Path $cache $Release.version
 
@@ -20,28 +21,6 @@ function Test-HexagonSdk([string]$Path) {
         return ($tools -and (Test-Path -LiteralPath (Join-Path $Path "$tools/Tools/bin/hexagon-clang.exe") -PathType Leaf))
     } catch {
         return $false
-    }
-}
-
-function Invoke-SdkDownloadProcess([string]$Exe, [string[]]$Arguments, [int]$Seconds) {
-    $start = [Diagnostics.ProcessStartInfo]::new($Exe)
-    $start.Arguments = ($Arguments | ForEach-Object { '"' + ($_ -replace '(\\+)$', '$1$1') + '"' }) -join ' '
-    $start.UseShellExecute = $false
-    $start.RedirectStandardError = $true
-    $start.StandardErrorEncoding = [Text.Encoding]::UTF8
-    $child = [Diagnostics.Process]::Start($start)
-    try {
-        $timer = [Diagnostics.Stopwatch]::StartNew()
-        $errors = $child.StandardError.ReadToEndAsync()
-        if (!$child.WaitForExit($Seconds * 1000) -or
-            !$errors.Wait([Math]::Max(0, $Seconds * 1000 - [int]$timer.ElapsedMilliseconds))) {
-            return @{ Code = -1; Detail = "timed out after ${Seconds}s" }
-        }
-        $detail = [string]($errors.GetAwaiter().GetResult() -split '\r?\n' | Where-Object { $_.Trim() } | Select-Object -Last 1)
-        if ($detail) { $detail = $detail.Trim() }
-        return @{ Code = $child.ExitCode; Detail = $detail }
-    } finally {
-        try { if (!$child.HasExited) { $child.Kill() } } finally { $child.Dispose() }
     }
 }
 
@@ -72,24 +51,23 @@ try {
         Write-Host "[voxt] Downloading Hexagon SDK $($Release.version) (about 900 MB, up to 8 minutes total)."
         $curl = Get-Command curl.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
         $curlFailure = 'curl.exe unavailable'
+        $curlTlsFailure = $false
         if ($curl) {
-            $downloadArgs = @('--proto', '=https', '--proto-redir', '=https', '--fail', '--location', '--silent', '--show-error',
-                '--connect-timeout', '20', '--max-time', "$budget", '--speed-limit', '1024', '--speed-time', '30',
-                '--output', $archive, $Release.url)
-            $result = Invoke-SdkDownloadProcess $curl.Source $downloadArgs $budget
+            $result = Invoke-PinnedPackageCurl $curl.Source $Release.url $archive $budget 30
+            $curlTlsFailure = $result.RevocationLookupFailed -or $result.Code -in 35, 51, 58, 60, 77, 82, 83, 90, 91
             $curlFailure = if ($result.Code -eq 0) { $null } else { "curl exit $($result.Code): $($result.Detail)" }
         }
         if ($curlFailure) {
             Write-Host "[voxt] SDK download error | $curlFailure"
-            if ($curlFailure -match 'unable to check revocation|CRYPT_E_(NO_REVOCATION_CHECK|REVOCATION_OFFLINE)|0x8009201[23]') {
-                throw "Windows could not check certificate revocation. $curlFailure. $localHint"
+            if ($curlTlsFailure) {
+                throw "SDK HTTPS download failed. $curlFailure. $localHint"
             }
             $remaining = [int][Math]::Floor($budget - $timer.Elapsed.TotalSeconds)
             if ($remaining -lt 1) { throw "Hexagon SDK download budget exhausted. $curlFailure. $localHint" }
             Write-Host "[voxt] Retrying through Windows PowerShell (up to ${remaining}s)."
             if (Test-Path -LiteralPath $archive) { Remove-Item -LiteralPath $archive -Force }
             $hostExe = (Get-Process -Id $PID).Path
-            $result = Invoke-SdkDownloadProcess $hostExe @('-NoLogo', '-NoProfile', '-NonInteractive', '-File',
+            $result = Invoke-BoundedWindowsTool $hostExe @('-NoLogo', '-NoProfile', '-NonInteractive', '-File',
                 (Join-Path $PSScriptRoot 'download_hexagon_sdk_web.ps1'), '-Uri', $Release.url,
                 '-Archive', $archive, '-TimeoutSeconds', "$remaining") $remaining
             if ($result.Code -ne 0) {

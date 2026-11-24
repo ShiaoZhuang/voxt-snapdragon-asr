@@ -17,11 +17,11 @@ if ($LASTEXITCODE -eq 0) { git restore --source=FETCH_HEAD -- scripts/win-arm64/
 
 启动器会显示正在运行的阶段、错误和每 30 秒的等待提示。验证阶段超过 35 分钟会退出并保留已有报告。可用 `-Route QnnLive` 单独跑混合转录对照，或用 `-Route GgmlHexagon` 单独跑 GGML。
 
-当前固定入口先用同一条 `zh-plain-1.wav` 比较全 GPU DFlash 和 GPU + QNN HTP DFlash 的完整请求，再运行独立的 GGML Hexagon 验证。QNN 回放已通过，完整请求使用现有的 ARM64 QNN Python 环境。GGML Hexagon 构建受阻时会记录具体原因，并用本地 OpenCL 服务继续完成两组 Adreno 测速。请拍最后的 **VOXT SNAPDRAGON REPORT**，若一屏放不下，请分两张。无需重跑 31 条 CPU 基准。
+当前固定入口先用同一条 `zh-plain-1.wav` 比较全 GPU DFlash 和 GPU + QNN HTP DFlash 的完整请求，再运行独立的 GGML Hexagon 验证。QNN 回放已通过，完整请求使用现有的 ARM64 QNN Python 环境。两条路线分别报告结果。GGML 的准备步骤受阻时直接记录具体错误并结束该路线。请拍最后的 **VOXT SNAPDRAGON REPORT**，若一屏放不下，请分两张。无需重跑 31 条 CPU 基准。
 
 ## GPU + QNN HTP 转录
 
-脚本先采集一批全 GPU 的八位置验证张量，为短上下文下的 28 层量化图确定形状与激活范围。采集和构建会话在计时前完成。两条测速请求均使用相同的模型、音频和 Q4 草稿配置。需要已有实机回放创建的 ARM64 QNN Python 环境。
+脚本先采集一批全 GPU 的八位置验证张量，为短上下文下的 28 层量化图确定形状与激活范围。采集和构建会话在计时前完成。先测混合转录，取得实际 HTP 执行记录后才测一次全 GPU DFlash 对照。两条测速请求均使用相同的模型、音频和 Q4 草稿配置。需要已有实机回放创建的 ARM64 QNN Python 环境。
 
 混合路径用 GPU 执行音频预填充、Target prefill、草稿和不足八位置的批次。满八位置时，现有解码器把实际位置、token 和活动历史 KV 交给 QNN worker。worker 用 HTP 执行 28 层，主机处理 token embedding 和词表输出层。K/V、三处 Draft 辅助状态和 logits 写回原解码器，原接受、拒绝与回滚逻辑继续负责提交顺序。首次实现逐轮通过本地文件传输张量，全部等待、搬运、主机输出层和 QNN 执行时间计入请求 TPS。会话的固定历史容量按报告显示，超出容量会报对应错误。
 
@@ -29,7 +29,7 @@ if ($LASTEXITCODE -eq 0) { git restore --source=FETCH_HEAD -- scripts/win-arm64/
 
 ## GGML Hexagon 音频转录
 
-脚本先查找现有 Hexagon SDK。找不到时下载 llama.cpp 指南列出的 Windows ARM64 Hexagon SDK Community Edition 6.7.0.0（约 900 MB），校验发布包的 SHA-256，解压到 `build/win-arm64-native/sdk/hexagon`，并在这次构建中传入 SDK 路径。下次会复用该目录。在线下载总预算为 8 分钟。Windows 无法确认 TLS 证书吊销状态时，脚本会立即显示原始错误并结束该下载；其他网络错误可在剩余预算内用 PowerShell 重试。默认 Downloads 或 SDK 缓存目录里的同名发布包可直接校验和解压。下载或构建受阻时，固定命令仍会用本机 OpenCL 构建测 Adreno。[上游 SDK 发行页](https://github.com/snapdragon-toolchain/hexagon-sdk/releases/tag/v6.7.0.0)
+脚本先查找现有 Hexagon SDK。找不到时下载 llama.cpp 指南列出的 Windows ARM64 Hexagon SDK Community Edition 6.7.0.0（约 900 MB），校验发布包的 SHA-256，解压到 `build/win-arm64-native/sdk/hexagon`，并在这次构建中传入 SDK 路径。下次会复用该目录。在线下载总预算为 8 分钟。遇到 Schannel 无法查询吊销状态的错误，会在剩余预算内用 `--ssl-revoke-best-effort` 重试一次。其他网络错误可在剩余预算内用 PowerShell 重试。默认 Downloads 或 SDK 缓存目录里的同名发布包可直接校验和解压。[上游 SDK 发行页](https://github.com/snapdragon-toolchain/hexagon-sdk/releases/tag/v6.7.0.0)
 
 官网 ZIP 解压后可把 `HEXAGON_SDK_ROOT` 指向包含 `build/cmake/hexagon_fun.cmake` 的版本目录。该 SDK 缺少 Windows 可选扩展时，GGML 会在构建目录应用与 Community Edition Windows 发行包相同的兼容设置，也会识别 ZIP 中 `WinNT` 目录的 IDL 编译器。兼容处理保留原 SDK 文件。[上游 Windows SDK 补丁](https://github.com/snapdragon-toolchain/hexagon-sdk/blob/v6.7.0.0/patches/wos-patch)
 
@@ -37,11 +37,11 @@ if ($LASTEXITCODE -eq 0) { git restore --source=FETCH_HEAD -- scripts/win-arm64/
 
 两个证书库都找不到合适的证书时，脚本使用当前用户的临时自签名证书试跑。自签包保存在该轮日志目录，签名后清理临时证书和私钥。即使通用签名验证返回错误，也会用正常 HTP 加载路径实测，并保留原始错误。[PowerShell 测试证书文档](https://learn.microsoft.com/en-us/powershell/module/pki/new-selfsignedcertificate)
 
-缺少 `Inf2Cat` 或 `SignTool` 时，脚本查找 Downloads 和构建缓存里的同名 NuGet 包，或从微软 NuGet 下载相应工具包。每个下载最多 90 秒，脚本核对 SHA-256 并在本轮日志目录解包工具及依赖。[微软 WDK NuGet 说明](https://learn.microsoft.com/windows-hardware/drivers/install-the-wdk-using-nuget) · [Windows SDK BuildTools](https://www.nuget.org/packages/Microsoft.Windows.SDK.BuildTools/10.0.26100.6584)
+缺少 `Inf2Cat` 或 `SignTool` 时，脚本查找 Downloads 和构建缓存里的同名 NuGet 包，或从微软 NuGet 下载相应工具包。每个包的 90 秒预算包含与 Hexagon SDK 共用的 Schannel 重试。脚本核对 SHA-256 并在本轮日志目录解包工具及依赖。[微软 WDK NuGet 说明](https://learn.microsoft.com/windows-hardware/drivers/install-the-wdk-using-nuget) · [curl 的吊销检查参数](https://curl.se/docs/manpage.html#--ssl-revoke-best-effort)
 
-工具或签名失败时，报告会打印原因和待签的 `v73 package` 目录，并继续 Adreno 测速。可以把匹配的 `libggml-htp.cat` 放回该目录，也可将 `GGML_HEXAGON_LIBHTP_DIR` 指向包含同一 SHA-256 算子库及其签名 catalog 的目录。已有 PFX 环境仍可设置 `HEXAGON_HTP_CERT` 使用上游构建签名路径。[固定版本的上游 Windows 说明](https://github.com/ggml-org/llama.cpp/blob/e412c6f468b7b9e0f16f2540244236f8ad68e9ae/docs/backend/snapdragon/windows.md)
+工具或签名失败时，报告会打印原因和待签的 `v73 package` 目录。可以把匹配的 `libggml-htp.cat` 放回该目录，也可将 `GGML_HEXAGON_LIBHTP_DIR` 指向包含同一 SHA-256 算子库及其签名 catalog 的目录。已有 PFX 环境仍可设置 `HEXAGON_HTP_CERT` 使用上游构建签名路径。[固定版本的上游 Windows 说明](https://github.com/ggml-org/llama.cpp/blob/e412c6f468b7b9e0f16f2540244236f8ad68e9ae/docs/backend/snapdragon/windows.md)
 
-对同一条 `zh-plain-1.wav`，脚本分别运行 Adreno 和 HTP0 Target，每种设备各测 Target-only 和 Q4 DFlash。音频投影及可选草稿都在 Adreno。每个测试启动独立服务，比对 Adreno Target-only 的完整 token 序列和转录文本。GGML Hexagon 还要求请求开始后出现有非零周期的 DSP 算子记录。GGML 调度器可能将部分计算放在主机上。两侧都通过时，报告会按同一模式给出 Hexagon / Adreno 请求吞吐倍率。每个测试的 `.txt` 保存原始日志，`.metrics.json` 保存文本、token 和计时。摘要中的 request tok/s 使用生成 token 数（排除 EOS）除以 HTTP 请求时间，包括音频预填充和解码，排除启动加载时间。HTP 测试打开了设备 profiling。
+对同一条 `zh-plain-1.wav`，GGML 路线仅测 HTP0 Target-only 和 HTP0 Target 配 Q4 DFlash。音频投影及可选草稿都在 Adreno。每个测试启动独立服务，比对两个 HTP 请求的完整 token 序列和转录文本。同轮有 GPU 校准转录时也复用其 token 和文本进行对照。GGML Hexagon 还要求请求开始后出现有非零周期的 DSP 算子记录。GGML 调度器可能将部分计算放在主机上。每个测试的 `.txt` 保存原始日志，`.metrics.json` 保存文本、token 和计时。摘要中的 request tok/s 使用生成 token 数（排除 EOS）除以 HTTP 请求时间，包括音频预填充和解码，排除启动加载时间。HTP 测试打开了设备 profiling。
 
 ## 完整 Target 回放
 

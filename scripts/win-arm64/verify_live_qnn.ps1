@@ -20,8 +20,10 @@ $probeArgs = @{InstallDirectory=$InstallDirectory; NativeBuildDirectory=$BuildDi
 $capture = Join-Path $LogDirectory 'live-calibration'
 $calibrationLog = Join-Path $LogDirectory 'live-calibration.txt'
 Write-Host '[voxt] Capturing the eight-position calibration batch.'
-& $probe @probeArgs -CaptureDirectory $capture -CaptureAllLayers -ReportPath $calibrationLog | Out-Host
-if (!(Test-Path -LiteralPath (Join-Path $capture 'target_logits.f32') -PathType Leaf)) {
+& $probe @probeArgs -CaptureDirectory $capture -CaptureAllLayers -ReportPath $calibrationLog -MetricsPath "$calibrationLog.metrics.json" | Out-Host
+$captureLines = @(Get-Content -Encoding UTF8 -LiteralPath $calibrationLog)
+if (!($captureLines -match '^Transcription probe: PASS$') -or !($captureLines -match '^Capture: PASS') -or
+    !(Test-Path -LiteralPath (Join-Path $capture 'target_logits.f32') -PathType Leaf)) {
     throw "No complete capture for QNN calibration. See $calibrationLog"
 }
 
@@ -48,14 +50,10 @@ function Invoke-LiveClip([string]$Name, [string]$Directory) {
     }
 }
 
-Write-Host '[voxt] Measuring all-GPU DFlash.'
-$baseline = Invoke-LiveClip 'live-gpu-dflash' ''
-$Summary.Add(('All-GPU DFlash | {0} tokens | {1:F0} ms | {2:F2} request tok/s' -f
-    $baseline.Metrics.tokens, $baseline.Metrics.wall_ms, $baseline.Rate))
-Write-Host "[voxt] $($Summary[$Summary.Count - 1])"
 $workerDirectory = (New-Item -ItemType Directory -Path (Join-Path $LogDirectory 'live-qnn-worker')).FullName
 $workerError = Join-Path $workerDirectory 'error.json'
 $workerOut = Join-Path $workerDirectory 'stdout.log'
+$workerStderr = Join-Path $workerDirectory 'stderr.log'
 $workerScript = Join-Path $PSScriptRoot '../../tools/qnn-probe/live_verify.py'
 $models = Join-Path $InstallDirectory 'models'
 $arguments = @('-X', 'utf8', $workerScript, '--target', (Join-Path $models 'target.gguf'),
@@ -63,7 +61,7 @@ $arguments = @('-X', 'utf8', $workerScript, '--target', (Join-Path $models 'targ
 $quoted = ($arguments | ForEach-Object { '"' + $_ + '"' }) -join ' '
 $processArgs = @{
     FilePath=$python; ArgumentList=$quoted; NoNewWindow=$true; PassThru=$true
-    RedirectStandardOutput=$workerOut; RedirectStandardError=(Join-Path $workerDirectory 'stderr.log')
+    RedirectStandardOutput=$workerOut; RedirectStandardError=$workerStderr
 }
 Write-Host '[voxt] Calibrating and initializing the QNN verifier (up to 12 minutes).'
 $worker = Start-Process @processArgs
@@ -73,7 +71,7 @@ try {
         if ($worker.HasExited -or (Get-Date) -ge $deadline) {
             $detail = if (Test-Path -LiteralPath $workerError) {
                 (Get-Content -Raw -LiteralPath $workerError | ConvertFrom-Json).error
-            } else { @(Get-Content -LiteralPath $workerOut -Tail 2) -join ' | ' }
+            } else { @(Get-Content -LiteralPath $workerOut,$workerStderr -Tail 2) -join ' | ' }
             throw "QNN worker did not become ready. $detail"
         }
         Start-Sleep -Milliseconds 250
@@ -98,6 +96,11 @@ $Summary.Add(('GPU + HTP DFlash | {0} tokens | {1:F0} ms | {2:F2} request tok/s 
 if ($hybrid.LiveRounds -lt 1 -or $hybrid.LiveRounds -gt $hybrid.Metrics.rounds -or $profile.rounds -ne $hybrid.LiveRounds -or $profile.qaairt_execute_events -lt $profile.rounds) {
     throw 'Missing device execution evidence for live Target verification.'
 }
+Write-Host '[voxt] Measuring the all-GPU DFlash reference.'
+$baseline = Invoke-LiveClip 'live-gpu-dflash' ''
+if ($baseline.LiveRounds -ne 0) { throw 'Unexpected live verification rounds in the all-GPU reference.' }
+$Summary.Add(('All-GPU DFlash | {0} tokens | {1:F0} ms | {2:F2} request tok/s' -f
+    $baseline.Metrics.tokens, $baseline.Metrics.wall_ms, $baseline.Rate))
 if ($hybrid.Metrics.text -cne $baseline.Metrics.text -or ($hybrid.Metrics.ids -join ',') -ne ($baseline.Metrics.ids -join ',')) {
     throw 'Live QNN transcript or generated token sequence differs from all-GPU DFlash.'
 }

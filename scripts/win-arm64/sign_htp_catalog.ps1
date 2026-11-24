@@ -7,37 +7,11 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'windows_tool_download.ps1')
 $package = (Resolve-Path -LiteralPath $PackageDirectory).Path
 $catalogName = 'libggml-htp.cat'
 $catalog = Join-Path $package $catalogName
 if (Test-Path -LiteralPath $catalog -PathType Leaf) { return $package }
-
-function Invoke-SigningTool([string]$Tool, [string[]]$Arguments, [int]$TimeoutSeconds) {
-    $start = [Diagnostics.ProcessStartInfo]::new($Tool)
-    $start.Arguments = ($Arguments | ForEach-Object { '"' + ($_ -replace '(\\+)$', '$1$1') + '"' }) -join ' '
-    $start.WorkingDirectory = Split-Path -Parent $Tool
-    $start.UseShellExecute = $false
-    $start.CreateNoWindow = $true
-    $start.RedirectStandardOutput = $true
-    $start.RedirectStandardError = $true
-    $process = [Diagnostics.Process]::Start($start)
-    try {
-        $timer = [Diagnostics.Stopwatch]::StartNew()
-        $stdout = $process.StandardOutput.ReadToEndAsync()
-        $stderr = $process.StandardError.ReadToEndAsync()
-        if (!$process.WaitForExit($TimeoutSeconds * 1000) -or
-            ![Threading.Tasks.Task]::WaitAll(@($stdout, $stderr), [Math]::Max(0, $TimeoutSeconds * 1000 - [int]$timer.ElapsedMilliseconds))) {
-            return @{ Code = -1; Detail = "timed out after ${TimeoutSeconds}s" }
-        }
-        $output = @($stdout.GetAwaiter().GetResult(), $stderr.GetAwaiter().GetResult())
-        foreach ($part in $output) { if ($part.Trim()) { Write-Host $part.TrimEnd() } }
-        $detail = @(($output -join "`n") -split '\r?\n' | Where-Object { $_.Trim() } | Select-Object -Last 4)
-        return @{ Code = $process.ExitCode; Detail = ($detail -join ' | ') }
-    } finally {
-        try { if (!$process.HasExited) { $process.Kill(); $null = $process.WaitForExit(5000) } }
-        finally { $process.Dispose() }
-    }
-}
 
 function Find-WindowsKitTool([string]$Name) {
     $command = Get-Command $Name -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -66,9 +40,7 @@ function Get-NuGetSigningTool([string]$Tool, $Release) {
         $partial = "$cached.partial-$([guid]::NewGuid())"
         try {
             Write-Host "[voxt] Downloading $Tool from Microsoft NuGet (up to 90 seconds)."
-            $result = Invoke-SigningTool $curl.Source @('--proto', '=https', '--proto-redir', '=https',
-                '--fail', '--location', '--silent', '--show-error', '--connect-timeout', '15',
-                '--max-time', '90', '--speed-limit', '1024', '--speed-time', '20', '--output', $partial, $Release.url) 90
+            $result = Invoke-PinnedPackageCurl $curl.Source $Release.url $partial 90 20
             if ($result.Code -ne 0) { throw "$Tool package download failed (curl exit $($result.Code)) | $($result.Detail) | $hint" }
             if ((Get-FileHash -LiteralPath $partial -Algorithm SHA256).Hash -ne $Release.sha256) {
                 throw "SHA-256 mismatch for downloaded $name."
@@ -147,7 +119,7 @@ try {
     $infName = 'libggml-htp.inf'
     Copy-Item -LiteralPath (Join-Path $package $dspName), (Join-Path $package $infName) -Destination $stage
     Write-Host "[voxt] Generating the v73 catalog with Inf2Cat ($os)."
-    $result = Invoke-SigningTool $inf2cat @("/driver:$stage", "/os:$os", '/uselocaltime') 60
+    $result = Invoke-BoundedWindowsTool $inf2cat @("/driver:$stage", "/os:$os", '/uselocaltime') 60
     if ($result.Code -ne 0) { throw "Inf2Cat failed (exit $($result.Code)) | $($result.Detail)" }
     $Summary.Add("Inf2Cat: PASS | $os")
     $stagedCatalog = Join-Path $stage $catalogName
@@ -173,7 +145,7 @@ try {
         $args = @('sign', '/fd', 'SHA256', '/s', 'My', '/sha1', $cert.Thumbprint)
         if ($cert.Store -eq 'LocalMachine') { $args += '/sm' }
         Write-Host "[voxt] Signing the v73 catalog with SignTool ($($cert.Store)/My, $($cert.Thumbprint))."
-        $result = Invoke-SigningTool $signtool ($args + $stagedCatalog) ([Math]::Min(30, $remaining))
+        $result = Invoke-BoundedWindowsTool $signtool ($args + $stagedCatalog) ([Math]::Min(30, $remaining))
         if ($result.Code -eq 0) { $signed = $cert; break }
         $failures += "$($cert.Store)/My $($cert.Thumbprint) (exit $($result.Code)) | $($result.Detail)"
     }
@@ -181,7 +153,7 @@ try {
     $Summary.Add("SignTool sign: PASS | $($signed.Store)/My $($signed.Thumbprint)")
 
     Write-Host '[voxt] Checking the signature and catalog members with SignTool.'
-    $result = Invoke-SigningTool $signtool @('verify', '/pa', '/c', $stagedCatalog,
+    $result = Invoke-BoundedWindowsTool $signtool @('verify', '/pa', '/c', $stagedCatalog,
         (Join-Path $stage $dspName), (Join-Path $stage $infName)) 45
     if ($result.Code -eq 0) {
         $Summary.Add('SignTool verify: PASS | v73 library and INF')
