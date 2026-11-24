@@ -4,6 +4,21 @@
     "url": "https://github.com/snapdragon-toolchain/hexagon-sdk/releases/download/v6.7.0.0/hexagon-sdk-v6.7.0.0-arm64-wos.tar.xz",
     "sha256": "9eb256cc7b102f721365151a470a33980069a18b9209e1d56a6d2fa430369759"
   },
+  "geniex_htp": {
+    "version": "v0.11.0",
+    "llama_cpp": "93cf736a8d1d46aa922e27eb64aa712bcd5ebc30",
+    "test_host_revision": "e412c6f468b7b9e0f16f2540244236f8ad68e9ae",
+    "url": "https://github.com/qualcomm/GenieX/releases/download/v0.11.0/geniex-sdk-windows-arm64-v0.11.0.zip",
+    "sha256": "b133208515cbdd885c1819e33427b87bf27d5e3dc9d674a3e2bfa770bb475ef8",
+    "files": {
+      "libggml-htp.cat": "cbff7cbfa391f0a79c78432572ef926bbbc07c9d6889ddd21e2a4e48ffa3a8e9",
+      "libggml-htp-v73.so": "43786e2aa9ebc70cb17a879c1ff821263cb1fc4a673ca08720c7be25a8aa0ddd",
+      "libggml-htp-v75.so": "d940820955eb4331b252ebb359bc37ce36b31df7432eb1b72ccdd762aa292033",
+      "libggml-htp-v79.so": "9a4de6e9feb52a5b60d90187e276aba519f0741e58ade918afd57dc235750e70",
+      "libggml-htp-v81.so": "a628f42c50788cb6c9ab797ee155c84fa9d1db32d6aaf59c0bb56c6ddfaac482",
+      "libggml-htp-v85.so": "9eea42f6854607c48052b89283a480d70cd454ce6ee6a76b5b5c66b8e9092d9f"
+    }
+  },
   "opencl": {
     "headers": {
       "repo": "https://github.com/KhronosGroup/OpenCL-Headers.git",

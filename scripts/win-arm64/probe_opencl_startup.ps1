@@ -9,7 +9,8 @@ param(
     [string]$MetricsPath,
     [string]$LiveVerifyDirectory,
     [switch]$Draft,
-    [ValidateSet('opencl', 'hexagon')][string]$Backend = 'opencl'
+    [ValidateSet('opencl', 'hexagon')][string]$Backend = 'opencl',
+    [string]$HexagonOpsDirectory
 )
 
 $ErrorActionPreference = 'Stop'
@@ -124,8 +125,12 @@ function Invoke-ClipProbe([int]$Port, [string]$Audio) {
         if ($Backend -eq 'hexagon') {
             $start.EnvironmentVariables['GGML_HEXAGON_DEVICES'] = 'HTP0'
             $start.EnvironmentVariables['GGML_HEXAGON_PROFILE'] = '1'
-            if (!$env:GGML_HEXAGON_LIBHTP_DIR -and $nativeBuild.htp_ops) {
-                $start.EnvironmentVariables['GGML_HEXAGON_LIBHTP_DIR'] = $nativeBuild.htp_ops
+            $ops = $HexagonOpsDirectory
+            if (!$ops) { $ops = $env:GGML_HEXAGON_LIBHTP_DIR }
+            if (!$ops) { $ops = $nativeBuild.htp_ops }
+            if ($ops) {
+                $start.EnvironmentVariables['GGML_HEXAGON_LIBHTP_DIR'] = $ops
+                "HTP library directory: $ops"
             }
         }
         if ($Transcribe) {

@@ -10,12 +10,13 @@ $Summary.Add('GGML Hexagon | zh-plain-1 | target on HTP0, audio and optional Q4 
 & (Join-Path $PSScriptRoot 'verify_replay_assets.ps1') -InstallDirectory $InstallDirectory
 $failed = @()
 $cases = @('adreno-target', 'adreno-draft')
+$hexagonBuilt = $false
 try {
     Write-Host "[voxt] Checking the Hexagon SDK and building GGML Hexagon."
     & (Join-Path $PSScriptRoot 'build_native.ps1') -BuildDirectory $BuildDirectory -BackendOnly -Hexagon -InstallHexagonSdk | Out-Host
     $product = Join-Path $BuildDirectory 'hexagon'
     $Summary.Add('GGML Hexagon native Windows build: PASS')
-    $cases += 'hexagon-target', 'hexagon-draft'
+    $hexagonBuilt = $true
 } catch {
     $failed += 'Hexagon build'
     $Summary.Add("GGML Hexagon build blocked | $($_.Exception.Message)")
@@ -25,6 +26,34 @@ try {
     & (Join-Path $PSScriptRoot 'build_native.ps1') -BuildDirectory $BuildDirectory -BackendOnly | Out-Host
     $product = $BuildDirectory
 }
+if ($hexagonBuilt) {
+    try {
+        $ops = $env:GGML_HEXAGON_LIBHTP_DIR
+        if (!$ops) {
+            $manifest = Get-Content -LiteralPath (Join-Path $product 'verify_native_manifest.json') -Raw | ConvertFrom-Json
+            $ops = $manifest.htp_ops
+        }
+        if (!$ops) {
+            $lock = Get-Content -LiteralPath (Join-Path $PSScriptRoot '../../sources.lock.json') -Raw | ConvertFrom-Json
+            if ($manifest.llama_cpp -ne $lock.geniex_htp.test_host_revision) {
+                throw 'This llama.cpp revision is outside the pinned GenieX HTP test. Supply matching signed HTP libraries.'
+            }
+            $ops = & (Join-Path $PSScriptRoot 'get_ggml_htp_bundle.ps1') -Release $lock.geniex_htp `
+                -CacheDirectory (Join-Path $BuildDirectory 'sdk/geniex-htp')
+            $Summary.Add("Signed HTP libraries: Qualcomm GenieX $($lock.geniex_htp.version) | DSP llama.cpp $($lock.geniex_htp.llama_cpp.Substring(0, 7))")
+        }
+        $ops = (Resolve-Path -LiteralPath $ops).Path
+        foreach ($member in @('libggml-htp.cat', 'libggml-htp-v73.so')) {
+            if (!(Test-Path -LiteralPath (Join-Path $ops $member) -PathType Leaf)) { throw "Missing $member in $ops." }
+        }
+        $Summary.Add("HTP library directory: $ops")
+        $cases += 'hexagon-target', 'hexagon-draft'
+    } catch {
+        $failed += 'signed HTP libraries'
+        $Summary.Add("Signed HTP libraries unavailable | $($_.Exception.Message)")
+        Write-Host "[voxt] $($Summary[$Summary.Count - 1])"
+    }
+}
 $baseline = $null
 $rates = @{}
 foreach ($name in $cases) {
@@ -33,8 +62,10 @@ foreach ($name in $cases) {
     $backend = if ($name -like 'adreno-*') { 'opencl' } else { 'hexagon' }
     $draft = $name -like '*-draft'
     try {
+        $probeOptions = @{}
+        if ($backend -eq 'hexagon') { $probeOptions.HexagonOpsDirectory = $ops }
         & (Join-Path $PSScriptRoot 'probe_opencl_startup.ps1') -InstallDirectory $InstallDirectory -NativeBuildDirectory $product `
-            -ReportPath $path -MetricsPath "$path.metrics.json" -Backend $backend -Transcribe -Draft:$draft | Out-Host
+            -ReportPath $path -MetricsPath "$path.metrics.json" -Backend $backend -Transcribe -Draft:$draft @probeOptions | Out-Host
         $lines = Get-Content -Encoding UTF8 -LiteralPath $path
         if (!($lines -match '^Transcription probe: PASS$') -or !($lines -match '^Exit code: 0 \(0x00000000\)$')) {
             $last = @($lines -match 'Startup probe error|Transcription probe: FAIL|No ready event|failed|error:|Exit code:' |
