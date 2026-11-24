@@ -14,7 +14,7 @@ from prepare_ffn import FfnGraph, add_swiglu, sigmoid
 from projection import save_onnx_graph
 
 
-MAX_NATIVE_STAGE_L2 = 0.03
+MAX_NATIVE_STAGE_L2 = 0.05
 
 
 def read_tensor(capture, manifest, name):

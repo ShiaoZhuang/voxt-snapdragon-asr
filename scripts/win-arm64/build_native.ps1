@@ -3,7 +3,8 @@ param(
     [string]$BuildDirectory = (Join-Path $PSScriptRoot '../../build/win-arm64-native'),
     [ValidateRange(1,64)][int]$Jobs = 6,
     [switch]$ToolchainCheck,
-    [switch]$BackendOnly
+    [switch]$BackendOnly,
+    [switch]$Hexagon
 )
 
 $ErrorActionPreference = 'Stop'
@@ -111,7 +112,21 @@ function Assert-Arm64PE([string]$Path) {
 
 $build = (New-Item -ItemType Directory -Path $BuildDirectory -Force).FullName
 $null = New-Item -ItemType Directory -Path (Join-Path $build 'src') -Force
-$bin = (New-Item -ItemType Directory -Path (Join-Path $build 'bin') -Force).FullName
+$product = $build
+if ($Hexagon) {
+    $product = Join-Path $build 'hexagon'
+    $sdk = $env:HEXAGON_SDK_ROOT
+    if (!$sdk) {
+        $candidate = Get-ChildItem -Path "$($env:SystemDrive)/Qualcomm/Hexagon_SDK/*" -Directory -ErrorAction SilentlyContinue |
+            Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'build/cmake/hexagon_fun.cmake') } |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        if ($candidate) { $sdk = $candidate.FullName }
+    }
+    if (!$sdk -or !(Test-Path -LiteralPath (Join-Path $sdk 'build/cmake/hexagon_fun.cmake'))) {
+        throw 'Hexagon SDK unavailable. Configure the installed Hexagon SDK 6.7+ with HEXAGON_SDK_ROOT.'
+    }
+}
+$bin = (New-Item -ItemType Directory -Path (Join-Path $product 'bin') -Force).FullName
 $lock = Get-Content -Raw -LiteralPath (Join-Path $root 'sources.lock.json') | ConvertFrom-Json
 $patchSource = Join-Path $root 'patches/llama-voxt.patch'
 $patch = Join-Path $build 'llama-voxt.patch'
@@ -180,6 +195,14 @@ Invoke-BuildTool cmake @('--build', $icdBuild, '--target', 'OpenCL', '--parallel
 $llamaBuild = Join-Path $build "llama-$patchId"
 $backendFlags = @('-DGGML_NATIVE=OFF', '-DGGML_CPU_ARM_ARCH=armv8.2-a+dotprod', '-DGGML_OPENMP=OFF',
     '-DGGML_OPENCL=ON', '-DGGML_OPENCL_USE_ADRENO_KERNELS=ON')
+if ($Hexagon) {
+    $llamaBuild = Join-Path $product "llama-$patchId"
+    # Use the driver's installed skels or a matching approved catalog and skels
+    # supplied via GGML_HEXAGON_LIBHTP_DIR. The upstream signing target also
+    # supports a certificate already configured for building these ops.
+    $backendFlags += @('-DGGML_HEXAGON=ON', '-DPREBUILT_LIB_DIR=windows_aarch64', "-DHEXAGON_SDK_ROOT=$sdk",
+        "-DHEXAGON_TOOLS_ROOT=$env:HEXAGON_TOOLS_ROOT", "-DGGML_HEXAGON_HTP_CERT=$env:HEXAGON_HTP_CERT")
+}
 Invoke-BuildTool cmake (@('-S', $llama, '-B', $llamaBuild) + $cmakeFlags + $backendFlags + @(
     '-DBUILD_SHARED_LIBS=OFF', "-DOpenCL_INCLUDE_DIR=$headers", "-DOpenCL_LIBRARY=$(Join-Path $icdBuild 'OpenCL.lib')",
     "-DPython3_EXECUTABLE=$python", "-DLLAMA_VOXT_SOURCE=$(Join-Path $root 'native')", "-DLLAMA_BUILD_COMMIT=$($lock.llama_cpp.commit)",
@@ -197,8 +220,13 @@ foreach ($name in $fileNames) {
 $manifest = [ordered]@{
     commit=$sourceCommit; llama_cpp=$lock.llama_cpp.commit
     opencl_loader=$lock.opencl.loader.commit; opencl_headers=$lock.opencl.headers.commit
-    toolchain=$toolchainVersion; build=$backendFlags -join ' '; files=$files
+    toolchain=$toolchainVersion; build=($backendFlags -notlike '-DGGML_HEXAGON_HTP_CERT=*') -join ' '; files=$files
+}
+if ($Hexagon -and $env:HEXAGON_HTP_CERT) {
+    $ops = Join-Path $llamaBuild 'ggml/src/ggml-hexagon'
+    if (!(Test-Path -LiteralPath (Join-Path $ops 'libggml-htp.cat'))) { throw 'Signed GGML HTP catalog missing after build.' }
+    $manifest.htp_ops = $ops
 }
 if (!$BackendOnly) { $manifest.voxt = $lock.voxt.public_commit }
-$manifest | ConvertTo-Json -Depth 5 | Set-Content -Encoding UTF8 -LiteralPath (Join-Path $build 'verify_native_manifest.json')
-Write-Output "Native ARM64 build ready at: $build"
+$manifest | ConvertTo-Json -Depth 5 | Set-Content -Encoding UTF8 -LiteralPath (Join-Path $product 'verify_native_manifest.json')
+Write-Output "Native ARM64 build ready at: $product"

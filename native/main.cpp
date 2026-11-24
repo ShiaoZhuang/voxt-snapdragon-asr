@@ -43,7 +43,7 @@ static int run(const std::vector<std::string> & arguments) {
     if (arguments.size() == 2 && arguments[1] == "--help") {
         std::cout << "qwen3_asr_server --supervised --host 127.0.0.1 --port 0 "
                      "--model-directory DIR [--draft-model-path DIR --draft-bits 4|6|8] "
-                     "[--backend auto|cpu|opencl] [--cache-limit-mb MB]\n";
+                     "[--backend auto|cpu|opencl|hexagon] [--cache-limit-mb MB]\n";
         return 0;
     }
 
@@ -90,7 +90,7 @@ static int run(const std::vector<std::string> & arguments) {
     }
 
     if (!supervised || (bits != "4" && bits != "6" && bits != "8") ||
-        (backend != "auto" && backend != "cpu" && backend != "opencl")) {
+        (backend != "auto" && backend != "cpu" && backend != "opencl" && backend != "hexagon")) {
         throw std::invalid_argument("invalid supervised, Draft bits or backend option");
     }
 
@@ -110,8 +110,9 @@ static int run(const std::vector<std::string> & arguments) {
     if (backend == "cpu") {
         options.insert(options.end(), {"--device", "none", "--n-gpu-layers", "0", "--no-mmproj-offload",
                                         "--spec-draft-device", "none", "--spec-draft-ngl", "0"});
-    } else if (backend == "opencl") {
-        options.insert(options.end(), {"--device", "GPUOpenCL", "--n-gpu-layers", "all",
+    } else if (backend == "opencl" || backend == "hexagon") {
+        const auto target_device = backend == "hexagon" ? "HTP0" : "GPUOpenCL";
+        options.insert(options.end(), {"--device", target_device, "--n-gpu-layers", "all",
                                         "--spec-draft-device", "GPUOpenCL", "--spec-draft-ngl", "all",
                                         "--mmproj-device", "GPUOpenCL"});
     }
@@ -140,6 +141,9 @@ static int run(const std::vector<std::string> & arguments) {
         routes.update_meta(context);
         std::atomic<bool> stopping = false;
         http.post("/v1/audio/transcriptions", [&](const server_http_req & request) {
+            if (backend == "hexagon") {
+                LOG_INF("voxt: GGML Hexagon audio request started\n");
+            }
             return routes.voxt_transcriptions(request, stopping);
         });
         http.is_ready.store(true);

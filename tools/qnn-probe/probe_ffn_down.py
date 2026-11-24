@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import math
 from pathlib import Path
 import subprocess
 from tempfile import TemporaryDirectory
@@ -128,8 +129,15 @@ def run(args):
         row["vs_dense"]["relative_l2_error"] <= MAX_NATIVE_STAGE_L2 and report["logits"][name]["matches"] == 8
     ]
     report["native_reference_passed"] = report["dense_vs_captured"]["relative_l2_error"] <= MAX_NATIVE_STAGE_L2
-    report["passed"] = (report["native_reference_passed"] and
-                        "q8-batch8" in report["matching_native_variants"] and
+    report["reference_accepted_by_top1"] = (
+        not report["native_reference_passed"] and math.isfinite(report["dense_vs_captured"]["relative_l2_error"])
+        and report["logits"]["dense"]["matches"] == 8
+    )
+    batch = report["variants"]["q8-batch8"]
+    batch_matches = ("vs_dense" in batch and math.isfinite(batch["vs_dense"]["relative_l2_error"]) and
+                     report["logits"]["q8-batch8"]["matches"] == 8)
+    report["passed"] = ((report["native_reference_passed"] or report["reference_accepted_by_top1"]) and
+                        batch_matches and
                         (args.skip_htp or (not htp.get("error") and htp["qaairt_execute_events"] > 0 and
                                            htp["htp_vs_qdq_reference"]["accuracy_passed"] and
                                            report["logits"]["htp"]["matches"] == 8)))

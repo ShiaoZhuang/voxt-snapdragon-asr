@@ -6,7 +6,9 @@ param(
     [string]$CaptureDirectory,
     [switch]$CaptureAllLayers,
     [switch]$Transcribe,
-    [switch]$Draft
+    [string]$MetricsPath,
+    [switch]$Draft,
+    [ValidateSet('opencl', 'hexagon')][string]$Backend = 'opencl'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -40,6 +42,7 @@ function Invoke-ClipProbe([int]$Port, [string]$Audio) {
         $response = $client.PostAsync("http://127.0.0.1:$Port/v1/audio/transcriptions", $form).GetAwaiter().GetResult()
         try {
             $body = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+            $timer.Stop()
             "Transcription HTTP $([int]$response.StatusCode) | Wall ms: $($timer.ElapsedMilliseconds)"
             $body.TrimEnd()
             $events = @($body -split '\r?\n' | Where-Object { $_ -match '^data: ' } | ForEach-Object { $_.Substring(6) })
@@ -47,6 +50,13 @@ function Invoke-ClipProbe([int]$Port, [string]$Audio) {
                 Where-Object type -eq 'transcript.text.done' | Select-Object -Last 1
             if (!$response.IsSuccessStatusCode -or !($events -contains '[DONE]') -or !$done.text -or !$done.generation_metadata) {
                 throw 'Expected a nonempty transcript and a complete SSE response with generation metadata.'
+            }
+            $meta = $done.generation_metadata
+            if ($MetricsPath) {
+                [ordered]@{text=$done.text; ids=@($meta.token_ids); tokens=$meta.generated_token_count;
+                    wall_ms=$timer.Elapsed.TotalMilliseconds; finish=$meta.finish_reason;
+                    rounds=$meta.verify_round_count; proposed=$meta.proposed_draft_token_count} |
+                    ConvertTo-Json -Depth 4 | Set-Content -Encoding UTF8 -LiteralPath $MetricsPath
             }
             if ($CaptureDirectory) {
                 $capture = Get-Content -Raw -LiteralPath (Join-Path $CaptureDirectory 'capture.json') | ConvertFrom-Json
@@ -70,7 +80,8 @@ function Invoke-ClipProbe([int]$Port, [string]$Audio) {
 }
 
 & {
-    if ($Draft) { '=== Voxt OpenCL Q4 DFlash startup ===' }
+    if ($Backend -eq 'hexagon') { "=== Voxt GGML Hexagon Target startup | draft=$Draft ===" }
+    elseif ($Draft) { '=== Voxt OpenCL Q4 DFlash startup ===' }
     else { '=== Voxt OpenCL Target startup ===' }
     'Time: ' + (Get-Date -Format o)
     "Windows: $([Environment]::OSVersion.VersionString) | PowerShell: $($PSVersionTable.PSVersion)"
@@ -99,7 +110,7 @@ function Invoke-ClipProbe([int]$Port, [string]$Audio) {
         if ($Draft -and !(Test-Path -LiteralPath (Join-Path $models 'draft-4.gguf') -PathType Leaf)) { throw 'Missing Q4 Draft model.' }
 
         $start = [Diagnostics.ProcessStartInfo]::new($server)
-        $start.Arguments = '--supervised --host 127.0.0.1 --port 0 --backend opencl --model-directory "' + $models + '"'
+        $start.Arguments = '--supervised --host 127.0.0.1 --port 0 --backend ' + $Backend + ' --model-directory "' + $models + '"'
         if ($Draft) { $start.Arguments += ' --draft-model-path "' + $models + '" --draft-bits 4' }
         $start.WorkingDirectory = $root
         $start.UseShellExecute = $false
@@ -109,6 +120,13 @@ function Invoke-ClipProbe([int]$Port, [string]$Audio) {
         $start.StandardOutputEncoding = [Text.Encoding]::UTF8
         $start.StandardErrorEncoding = [Text.Encoding]::UTF8
         $start.EnvironmentVariables['LLAMA_ARG_LOG_VERBOSITY'] = '5'
+        if ($Backend -eq 'hexagon') {
+            $start.EnvironmentVariables['GGML_HEXAGON_DEVICES'] = 'HTP0'
+            $start.EnvironmentVariables['GGML_HEXAGON_PROFILE'] = '1'
+            if (!$env:GGML_HEXAGON_LIBHTP_DIR -and $nativeBuild.htp_ops) {
+                $start.EnvironmentVariables['GGML_HEXAGON_LIBHTP_DIR'] = $nativeBuild.htp_ops
+            }
+        }
         if ($Transcribe) {
             $start.EnvironmentVariables['VOXT_ASR_TRACE'] = '1'
             $start.EnvironmentVariables['OMNI_DFLASH_PROFILE'] = '1'
