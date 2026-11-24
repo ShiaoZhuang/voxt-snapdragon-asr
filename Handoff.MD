@@ -31,6 +31,8 @@ if ($LASTEXITCODE -eq 0) { git restore --source=FETCH_HEAD -- scripts/win-arm64/
 
 脚本先查找现有 Hexagon SDK。找不到时下载 llama.cpp 指南列出的 Windows ARM64 Hexagon SDK Community Edition 6.7.0.0（约 900 MB），校验发布包的 SHA-256，解压到 `build/win-arm64-native/sdk/hexagon`，并在这次构建中传入 SDK 路径。下次会复用该目录。在线下载总预算为 8 分钟。Windows 无法确认 TLS 证书吊销状态时，脚本会立即显示原始错误并结束该下载；其他网络错误可在剩余预算内用 PowerShell 重试。默认 Downloads 或 SDK 缓存目录里的同名发布包可直接校验和解压。下载或构建受阻时，固定命令仍会用本机 OpenCL 构建测 Adreno。[上游 SDK 发行页](https://github.com/snapdragon-toolchain/hexagon-sdk/releases/tag/v6.7.0.0)
 
+官网 ZIP 解压后可把 `HEXAGON_SDK_ROOT` 指向包含 `build/cmake/hexagon_fun.cmake` 的版本目录。该 SDK 缺少 Windows 可选扩展时，GGML 会在构建目录应用与 Community Edition Windows 发行包相同的兼容设置，也会识别 ZIP 中 `WinNT` 目录的 IDL 编译器。兼容处理保留原 SDK 文件。[上游 Windows SDK 补丁](https://github.com/snapdragon-toolchain/hexagon-sdk/blob/v6.7.0.0/patches/wos-patch)
+
 脚本在独立目录编译同时启用 OpenCL 和 Hexagon 的本地服务。Windows 的 GGML Hexagon 运行还依赖 NPU 驱动，以及设备信任的目录签名所覆盖的配套 DSP 算子库。已有的配套库可通过 `GGML_HEXAGON_LIBHTP_DIR` 配置。已有签名环境可用上游的 `HEXAGON_HTP_CERT` 参与构建。[固定版本的上游 Windows 说明](https://github.com/ggml-org/llama.cpp/blob/e412c6f468b7b9e0f16f2540244236f8ad68e9ae/docs/backend/snapdragon/windows.md)
 
 对同一条 `zh-plain-1.wav`，脚本分别运行 Adreno 和 HTP0 Target，每种设备各测 Target-only 和 Q4 DFlash。音频投影及可选草稿都在 Adreno。每个测试启动独立服务，比对 Adreno Target-only 的完整 token 序列和转录文本。GGML Hexagon 还要求请求开始后出现有非零周期的 DSP 算子记录。GGML 调度器可能将部分计算放在主机上。两侧都通过时，报告会按同一模式给出 Hexagon / Adreno 请求吞吐倍率。每个测试的 `.txt` 保存原始日志，`.metrics.json` 保存文本、token 和计时。摘要中的 request tok/s 使用生成 token 数（排除 EOS）除以 HTTP 请求时间，包括音频预填充和解码，排除启动加载时间。HTP 测试打开了设备 profiling。

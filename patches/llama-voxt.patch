@@ -496,3 +496,84 @@ diff --git a/src/llama-context.cpp b/src/llama-context.cpp
      const auto status = graph_compute(res->get_gf(), ubatch.n_tokens > 1);
      if (status != GGML_STATUS_SUCCESS) {
          LLAMA_LOG_ERROR("%s: failed to compute graph, compute status: %d\n", __func__, status);
+--- a/ggml/src/ggml-hexagon/CMakeLists.txt
++++ b/ggml/src/ggml-hexagon/CMakeLists.txt
+@@ -19,7 +19,7 @@
+
+ message(STATUS "hexagon: using ${HEXAGON_SDK_ROOT} and ${HEXAGON_TOOLS_ROOT} for building libggml-htp skels")
+
+-include(${HEXAGON_SDK_ROOT}/build/cmake/hexagon_fun.cmake)
++include("${CMAKE_CURRENT_LIST_DIR}/hexagon-sdk.cmake")
+ include(ExternalProject)
+ find_package(Python3 REQUIRED COMPONENTS Interpreter)
+
+@@ -38,6 +38,10 @@
+     ${CMAKE_CURRENT_BINARY_DIR})
+ target_include_directories(htp_iface PRIVATE
+     ${HEXAGON_SDK_ROOT}/incs/stddef)
++
++if (ggml_hexagon_wos_include_dir)
++    target_include_directories(htp_iface PUBLIC "${ggml_hexagon_wos_include_dir}")
++endif()
+
+ build_idl(htp/htp_iface.idl htp_iface)
+
+--- a/ggml/src/ggml-hexagon/htp/CMakeLists.txt
++++ b/ggml/src/ggml-hexagon/htp/CMakeLists.txt
+@@ -1,7 +1,7 @@
+ cmake_minimum_required(VERSION 3.22.2)
+ project(ggml-htp C CXX ASM)
+
+-include(${HEXAGON_SDK_ROOT}/build/cmake/hexagon_fun.cmake)
++include("${CMAKE_CURRENT_LIST_DIR}/../hexagon-sdk.cmake")
+
+ include_directories(
+     ${HEXAGON_SDK_ROOT}/incs
+--- /dev/null
++++ b/ggml/src/ggml-hexagon/hexagon-sdk.cmake
+@@ -0,0 +1,45 @@
++set(ggml_hexagon_sdk_functions "${HEXAGON_SDK_ROOT}/build/cmake/hexagon_fun.cmake")
++if (CMAKE_HOST_WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Windows")
++    # Match the Windows Community Edition repack when the SDK lacks the WoS add-on.
++    # https://github.com/snapdragon-toolchain/hexagon-sdk/blob/v6.7.0.0/patches/wos-patch
++    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${ggml_hexagon_sdk_functions}")
++    file(READ "${ggml_hexagon_sdk_functions}" sdk_functions)
++    set(original_sdk_functions "${sdk_functions}")
++    if (CMAKE_SYSTEM_NAME STREQUAL "Windows" AND
++        NOT EXISTS "${HEXAGON_SDK_ROOT}/addons/wos/build/cmake/windows_fun.cmake")
++        string(REPLACE
++            [=[include(${HEXAGON_SDK_ROOT}/addons/wos/build/cmake/windows_fun.cmake)]=]
++            "set(ASYNC_RPC_SUPPORTED 1)\n    set(DSP_QUEUE_SUPPORTED 1)"
++            sdk_functions "${sdk_functions}")
++    endif()
++
++    # The Qualcomm ZIP can keep qaic in WinNT. The repack places it in bin.
++    set(qaic_dir "${HEXAGON_SDK_ROOT}/ipc/fastrpc/qaic")
++    if (NOT EXISTS "${qaic_dir}/bin/qaic.exe" AND EXISTS "${qaic_dir}/WinNT/qaic.exe")
++        string(REPLACE [=[${proj-qaic_src}/bin/qaic"]=] [=[${proj-qaic_src}/WinNT/qaic.exe"]=]
++            sdk_functions "${sdk_functions}")
++    endif()
++
++    if (NOT sdk_functions STREQUAL original_sdk_functions)
++        set(ggml_hexagon_sdk_functions "${CMAKE_CURRENT_BINARY_DIR}/hexagon-sdk/hexagon_fun.cmake")
++        file(WRITE "${ggml_hexagon_sdk_functions}" "${sdk_functions}")
++        message(STATUS "hexagon: applied Windows SDK CMake compatibility in the build directory")
++    endif()
++
++    # The optional add-on header declares FastRPC function pointers. GGML
++    # loads those entry points itself, as in the Windows SDK repack.
++    if (CMAKE_SYSTEM_NAME STREQUAL "Windows" AND
++        EXISTS "${HEXAGON_SDK_ROOT}/incs/remote.h" AND
++        NOT EXISTS "${HEXAGON_SDK_ROOT}/incs/remote_wos_ext.h")
++        file(STRINGS "${HEXAGON_SDK_ROOT}/incs/remote.h" sdk_wos_include
++            REGEX "^[ 	]*#[ 	]*include[ 	]+\"remote_wos_ext[.]h\"")
++        if (sdk_wos_include)
++            set(ggml_hexagon_wos_include_dir "${CMAKE_CURRENT_BINARY_DIR}/hexagon-sdk/include")
++            file(WRITE "${ggml_hexagon_wos_include_dir}/remote_wos_ext.h"
++                "// Optional Windows SDK add-on declarations are unused by GGML.\n")
++            message(STATUS "hexagon: supplied optional Windows SDK header in the build directory")
++        endif()
++    endif()
++endif()
++
++include("${ggml_hexagon_sdk_functions}")
