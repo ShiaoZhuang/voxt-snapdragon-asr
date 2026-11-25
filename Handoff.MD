@@ -43,7 +43,7 @@ if ($LASTEXITCODE -eq 0) { git restore --source=FETCH_HEAD -- scripts/win-arm64/
 
 对同一条 `zh-plain-1.wav`，GGML 路线仅测 HTP0 Target-only 和 HTP0 Target 配 Q4 DFlash。音频投影及可选草稿都在 Adreno。每个测试启动独立服务，比对两个 HTP 请求的完整 token 序列和转录文本。同轮有 GPU 校准转录时也复用其 token 和文本进行对照。GGML Hexagon 还要求请求开始后出现有非零周期的 DSP 算子记录。GGML 调度器可能将部分计算放在主机上。每个测试的 `.txt` 保存原始日志，`.metrics.json` 保存文本、token 和计时。摘要中的 request tok/s 使用生成 token 数（排除 EOS）除以 HTTP 请求时间，包括音频预填充和解码，排除启动加载时间。HTP 测试打开了设备 profiling。
 
-对自签信任做前后对照时，用同一条命令跑两次。第一次报告给出公钥证书 `htp-signer.cer`、签名指纹、有效期、本机证书库和可读取的 BCD 测试签名设置。设备管理员核对原始指纹，通过设备适用的测试签名流程配置该公钥证书。在 Windows 测试设备上，上游使用本地计算机的 Trusted Root Certification Authorities 和 Trusted Publishers。启动策略的变更和重启由管理员处理。使用相同命令复测，报告在服务、库和目录文件哈希均匹配时并列列出最近一次结果及当前 HTP0 Target-only 结果。证书过期或包变更时重新建立基线。[llama.cpp Windows 测试签名说明](https://github.com/ggml-org/llama.cpp/blob/e412c6f468b7b9e0f16f2540244236f8ad68e9ae/docs/backend/snapdragon/windows.md)
+对自签信任做前后对照时，用同一条命令跑两次。第一次报告给出公钥证书 `htp-signer.cer`、签名指纹、有效期、本机证书库和可读取的 BCD 测试签名设置。设备管理员核对原始指纹，通过设备适用的测试签名流程配置该公钥证书。在 Windows 测试设备上，上游使用本地计算机的 Trusted Root Certification Authorities 和 Trusted Publishers。在允许设备测试签名的机器上，可在仓库根目录的管理员 PowerShell 运行报告中带完整指纹的 `Elevated setup from repo root` 命令。脚本只接受本项目导出且指纹匹配、有效的代码签名公钥证书，导入后为当前启动项设置 TESTSIGNING。若启动配置写入失败，脚本回滚本次新增的证书。手动重启后，普通 PowerShell 的 GGML 报告中 `Active kernel test signing: True` 表示当前运行的内核允许测试签名。该模式影响整机。使用相同命令复测，报告在服务、库和目录文件哈希均匹配时并列列出最近一次结果及当前 HTP0 Target-only 结果。证书过期或包变更时重新建立基线。[llama.cpp Windows 测试签名说明](https://github.com/ggml-org/llama.cpp/blob/e412c6f468b7b9e0f16f2540244236f8ad68e9ae/docs/backend/snapdragon/windows.md)
 
 ## 完整 Target 回放
 

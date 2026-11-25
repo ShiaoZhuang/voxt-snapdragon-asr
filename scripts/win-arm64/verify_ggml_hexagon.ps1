@@ -7,6 +7,10 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $Summary.Add('GGML Hexagon | zh-plain-1 | target on HTP0, audio and optional Q4 draft on Adreno')
+try {
+    $active = & (Join-Path $PSScriptRoot 'get_active_testsigning.ps1')
+    $Summary.Add("Active kernel test signing: $active")
+} catch { $Summary.Add("Active kernel test signing: unknown | $($_.Exception.Message)") }
 & (Join-Path $PSScriptRoot 'verify_replay_assets.ps1') -InstallDirectory $InstallDirectory
 Write-Host '[voxt] Checking the Hexagon SDK and building GGML Hexagon.'
 & (Join-Path $PSScriptRoot 'build_native.ps1') -BuildDirectory $BuildDirectory -BackendOnly -Hexagon -InstallHexagonSdk | Out-Host
@@ -78,6 +82,7 @@ try {
             $cerPath = Join-Path $LogDirectory 'htp-signer.cer'
             [IO.File]::WriteAllBytes($cerPath, $cert.Export([Security.Cryptography.X509Certificates.X509ContentType]::Cert))
             $Summary.Add("Public test certificate: $cerPath")
+            $Summary.Add("Elevated setup from repo root: .\.local\win-arm64-handoff\source\scripts\win-arm64\enable_htp_test_signing.ps1 -SignerThumbprint $id")
             foreach ($store in 'Root','TrustedPublisher') {
                 $present = Test-Path -LiteralPath "Cert:\LocalMachine\$store\$id" -ErrorAction Stop
                 $Summary.Add("LocalMachine/$store has signer: $present")
