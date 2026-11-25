@@ -24,13 +24,83 @@ $library = Join-Path $ops 'libggml-htp-v73.so'
 if ((Get-FileHash -LiteralPath $library -Algorithm SHA256).Hash -ne $manifest.htp_ops_sha256) {
     throw 'The signed directory must contain the v73 DSP library produced by this llama.cpp build.'
 }
-if (!(Test-Path -LiteralPath (Join-Path $ops 'libggml-htp.cat') -PathType Leaf)) {
-    Write-Host '[voxt] Checking the Windows certificate stores for a code-signing key.'
-    $ops = & (Join-Path $PSScriptRoot 'sign_htp_catalog.ps1') -PackageDirectory $ops `
-        -TrialDirectory (Join-Path $LogDirectory 'htp-v73-self-signed') `
-        -ToolCacheDirectory (Join-Path $BuildDirectory 'sdk/windows-signing-tools') -Summary $Summary
+function Get-CatalogSigner([string]$Path) {
+    Add-Type -AssemblyName System.Security
+    $cms = [Security.Cryptography.Pkcs.SignedCms]::new()
+    $cms.Decode([IO.File]::ReadAllBytes($Path))
+    if ($cms.SignerInfos.Count -ne 1) { throw 'Expected one embedded catalog signer.' }
+    return $cms.SignerInfos[0].Certificate
 }
+
+$trialSignerId = $null
+$previousRuns = @(Get-ChildItem -LiteralPath (Split-Path -Parent $LogDirectory) -Directory |
+    Where-Object { $_.FullName -ne $LogDirectory } | Sort-Object Name -Descending)
+if (!(Test-Path -LiteralPath (Join-Path $ops 'libggml-htp.cat')) -and
+    !$env:VOXT_HTP_SIGNING_THUMBPRINT -and !$env:GGML_HEXAGON_LIBHTP_DIR) {
+    # Past trials retain their public catalog after their temporary private key is removed.
+    foreach ($run in $previousRuns) {
+        $trial = Join-Path $run.FullName 'htp-v73-self-signed'
+        $oldCat = Join-Path $trial 'libggml-htp.cat'
+        if (!(Test-Path -LiteralPath $oldCat -PathType Leaf)) { continue }
+        $oldReport = Join-Path $run.FullName 'workflow_summary.txt'
+        if (!(Test-Path -LiteralPath $oldReport)) { continue }
+        try { $oldSigner = Get-CatalogSigner $oldCat } catch { continue }
+        if (!$oldSigner -or $oldSigner.NotAfter -le (Get-Date)) { continue }
+        if (!(Select-String -LiteralPath $oldReport -Pattern "^HTP signing mode: temporary self-signed \| $($oldSigner.Thumbprint)$" -Quiet)) { continue }
+        $oldLib = Join-Path $trial 'libggml-htp-v73.so'
+        $oldInf = Join-Path $trial 'libggml-htp.inf'
+        if (!(Test-Path -LiteralPath $oldLib) -or !(Test-Path -LiteralPath $oldInf)) { continue }
+        if ((Get-FileHash -LiteralPath $oldLib).Hash -eq $manifest.htp_ops_sha256 -and
+            (Get-FileHash -LiteralPath $oldInf).Hash -eq (Get-FileHash -LiteralPath (Join-Path $ops 'libggml-htp.inf')).Hash) {
+            $trialSignerId = $oldSigner.Thumbprint
+            $ops = $trial
+            break
+        }
+    }
+}
+$ops = & (Join-Path $PSScriptRoot 'sign_htp_catalog.ps1') -PackageDirectory $ops `
+    -TrialDirectory (Join-Path $LogDirectory 'htp-v73-self-signed') `
+    -ToolCacheDirectory (Join-Path $BuildDirectory 'sdk/windows-signing-tools') -Summary $Summary
 $Summary.Add("HTP library directory: $ops")
+$catPath = Join-Path $ops 'libggml-htp.cat'
+$catHash = (Get-FileHash -LiteralPath $catPath).Hash
+$serverHash = (Get-FileHash -LiteralPath (Join-Path $product 'bin/qwen3_asr_server.exe')).Hash
+$trust = 'unknown'
+try {
+    $sig = Get-AuthenticodeSignature -LiteralPath $catPath
+    $trust = [string]$sig.Status
+    $cert = Get-CatalogSigner $catPath
+    $Summary.Add("Windows catalog trust: $trust | SHA256 $catHash")
+    if ($cert) {
+        $id = $cert.Thumbprint
+        $Summary.Add("Signer: $id | expires $($cert.NotAfter.ToString('yyyy-MM-dd HH:mm'))")
+        if ($id -eq $trialSignerId -or $Summary.Contains("HTP signing mode: temporary self-signed | $id")) {
+            $cerPath = Join-Path $LogDirectory 'htp-signer.cer'
+            [IO.File]::WriteAllBytes($cerPath, $cert.Export([Security.Cryptography.X509Certificates.X509ContentType]::Cert))
+            $Summary.Add("Public test certificate: $cerPath")
+            foreach ($store in 'Root','TrustedPublisher') {
+                $present = Test-Path -LiteralPath "Cert:\LocalMachine\$store\$id" -ErrorAction Stop
+                $Summary.Add("LocalMachine/$store has signer: $present")
+            }
+        }
+    }
+} catch { $Summary.Add("Signer inspection unavailable | $($_.Exception.Message)") }
+try {
+    $settings = & bcdedit.exe /enum '{current}' 2>&1
+    if ($LASTEXITCODE -ne 0) { throw 'BCD read unavailable to this user' }
+    $setting = @($settings -match '^\s*testsigning\s+' | Select-Object -First 1)
+    $Summary.Add("BCD current testsigning: $(if ($setting.Count) { $setting[0].Trim() } else { 'not listed' })")
+} catch { $Summary.Add("BCD current testsigning: unknown | $($_.Exception.Message)") }
+$comparison = [ordered]@{library=$manifest.htp_ops_sha256; catalog=$catHash; server=$serverHash; trust=$trust; target='incomplete'}
+foreach ($run in $previousRuns) {
+    $record = Join-Path $run.FullName 'htp-target-check.json'
+    if (!(Test-Path -LiteralPath $record -PathType Leaf)) { continue }
+    try { $prior = Get-Content -Raw -LiteralPath $record | ConvertFrom-Json } catch { continue }
+    if ($prior.library -eq $comparison.library -and $prior.catalog -eq $catHash -and $prior.server -eq $serverHash) {
+        $Summary.Add("Previous same server/SO/CAT ($($run.Name)): trust $($prior.trust) | HTP0 $($prior.target)")
+        break
+    }
+}
 
 $gpuMetricsPath = Join-Path $LogDirectory 'live-calibration.txt.metrics.json'
 $gpuReference = if (Test-Path -LiteralPath $gpuMetricsPath) { Get-Content -Raw -Encoding UTF8 -LiteralPath $gpuMetricsPath | ConvertFrom-Json }
@@ -71,7 +141,7 @@ foreach ($name in @('hexagon-target', 'hexagon-draft')) {
         if ($gpuReference -and ($m.text -cne $gpuReference.text -or ($m.ids -join ',') -ne ($gpuReference.ids -join ','))) {
             throw 'Generated text/token sequence differs from the GPU calibration transcription.'
         }
-        if (!$draft) { $target = $m }
+        if (!$draft) { $target = $m; $comparison.target = "PASS ($events DSP events)" }
         elseif (!$target -or $m.text -cne $target.text -or ($m.ids -join ',') -ne ($target.ids -join ',')) {
             throw 'HTP Target-only reference missing or generated text/token sequence differs. Inspect the metrics JSON files.'
         }
@@ -80,8 +150,14 @@ foreach ($name in @('hexagon-target', 'hexagon-draft')) {
         $failed += $name
         $Summary.Add("${name}: FAIL | $($_.Exception.Message)")
         if (!$draft -and $sessionOpenFailed) {
+            $comparison.target = 'session open failed'
             $Summary.Add('hexagon-draft: skipped because the same HTP0 library failed to open for Target-only.')
             break
+        }
+    } finally {
+        if (!$draft) {
+            $comparison | ConvertTo-Json | Set-Content -Encoding UTF8 -LiteralPath (Join-Path $LogDirectory 'htp-target-check.json')
+            $Summary.Add("Current HTP0 Target-only: $($comparison.target) | catalog trust $trust")
         }
     }
 }

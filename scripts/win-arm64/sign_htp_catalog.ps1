@@ -11,7 +11,7 @@ $ErrorActionPreference = 'Stop'
 $package = (Resolve-Path -LiteralPath $PackageDirectory).Path
 $catalogName = 'libggml-htp.cat'
 $catalog = Join-Path $package $catalogName
-if (Test-Path -LiteralPath $catalog -PathType Leaf) { return $package }
+$hasCatalog = Test-Path -LiteralPath $catalog -PathType Leaf
 
 function Find-WindowsKitTool([string]$Name) {
     $command = Get-Command $Name -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -98,7 +98,7 @@ $candidates = @(foreach ($store in @('CurrentUser', 'LocalMachine')) {
         $Summary.Add("HTP certificate store $store/My unavailable | $($_.Exception.Message)")
     }
 })
-if (!$candidates.Count -and $thumbprint) {
+if (!$hasCatalog -and !$candidates.Count -and $thumbprint) {
     throw 'The requested certificate is unavailable or lacks a valid code-signing key.'
 }
 
@@ -113,13 +113,23 @@ if ($kitRoot) {
             Sort-Object { [version]$_.Name } -Descending | ForEach-Object FullName)
     }
 }
-$inf2cat = Find-WindowsKitTool 'Inf2Cat.exe'
 $signtool = Find-WindowsKitTool 'SignTool.exe'
-if (!$inf2cat -or !$signtool) {
-    $lock = Get-Content -LiteralPath (Join-Path $PSScriptRoot '../../sources.lock.json') -Raw | ConvertFrom-Json
-    if (!$inf2cat) { $inf2cat = Get-NuGetSigningTool 'Inf2Cat' $lock.windows_signing_tools.inf2cat }
-    if (!$signtool) { $signtool = Get-NuGetSigningTool 'SignTool' $lock.windows_signing_tools.signtool }
+$lock = Get-Content -LiteralPath (Join-Path $PSScriptRoot '../../sources.lock.json') -Raw | ConvertFrom-Json
+if (!$signtool) {
+    try { $signtool = Get-NuGetSigningTool 'SignTool' $lock.windows_signing_tools.signtool }
+    catch {
+        if (!$hasCatalog) { throw }
+        $Summary.Add("Catalog member verification unavailable | $($_.Exception.Message)")
+        return $package
+    }
 }
+if ($hasCatalog) {
+    $result = Invoke-BoundedWindowsTool $signtool @('verify', '/pa', '/c', $catalog, (Join-Path $package 'libggml-htp-v73.so')) 45
+    $Summary.Add("SignTool verify (/pa, v73 member): exit $($result.Code) | $($result.Detail)")
+    return $package
+}
+$inf2cat = Find-WindowsKitTool 'Inf2Cat.exe'
+if (!$inf2cat) { $inf2cat = Get-NuGetSigningTool 'Inf2Cat' $lock.windows_signing_tools.inf2cat }
 $windowsBuild = [int](Get-ItemPropertyValue 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' 'CurrentBuildNumber')
 $os = if ($windowsBuild -ge 26200) { '10_25H2_ARM64' } elseif ($windowsBuild -ge 26100) { '10_GE_ARM64' } else { '10_NI_ARM64' }
 
@@ -141,7 +151,7 @@ try {
         Write-Host '[voxt] Creating a temporary self-signed certificate for the v73 load test.'
         $trialCert = New-SelfSignedCertificate -Type CodeSigningCert -CertStoreLocation 'Cert:\CurrentUser\My' `
             -Subject "CN=Voxt HTP v73 test $([guid]::NewGuid())" -KeyExportPolicy NonExportable `
-            -HashAlgorithm SHA256 -NotAfter ((Get-Date).AddDays(1))
+            -HashAlgorithm SHA256 -NotAfter ((Get-Date).AddDays(7))
         $candidates = @([pscustomobject]@{ Store = 'CurrentUser'; Thumbprint = $trialCert.Thumbprint })
         $Summary.Add("HTP signing mode: temporary self-signed | $($trialCert.Thumbprint)")
     }

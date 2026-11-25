@@ -35,13 +35,15 @@ if ($LASTEXITCODE -eq 0) { git restore --source=FETCH_HEAD -- scripts/win-arm64/
 
 脚本从同一份固定 llama.cpp 源码构建 Windows 服务和 v73 DSP 算子库。已有 catalog 时复用。缺少 catalog 时，脚本检查 Windows 的 `CurrentUser\My` 和 `LocalMachine\My`，优先选有效且带私钥的当前用户代码签名证书。可用 `VOXT_HTP_SIGNING_THUMBPRINT` 指定证书指纹。找到可用证书后，使用 WDK 的 `Inf2Cat` 生成 catalog，用 `SignTool` 签名并验证 v73 算子库和 INF 的目录成员关系，然后尝试 HTP0 转录。最终以设备加载结果和实际请求的 DSP profiler 为准。[Inf2Cat](https://learn.microsoft.com/en-us/windows-hardware/drivers/devtest/inf2cat) · [SignTool](https://learn.microsoft.com/en-us/windows/win32/seccrypto/signtool)
 
-两个证书库都找不到合适的证书时，脚本使用当前用户的临时自签名证书试跑。自签包保存在该轮日志目录，签名后清理临时证书和私钥。即使通用签名验证返回错误，也会用正常 HTP 加载路径实测，并保留原始错误。[PowerShell 测试证书文档](https://learn.microsoft.com/en-us/powershell/module/pki/new-selfsignedcertificate)
+两个证书库都找不到合适的证书时，脚本使用当前用户的临时自签名证书试跑。自签包保存在该轮日志目录，签名后清理临时证书和私钥。下次优先复用同一份有效自签包，核对库和 INF 的哈希及原运行记录的签名指纹。新生成的测试证书有效期为七天。即使通用签名验证返回错误，也会用正常 HTP 加载路径实测，并保留原始错误。[PowerShell 测试证书文档](https://learn.microsoft.com/en-us/powershell/module/pki/new-selfsignedcertificate)
 
 缺少 `Inf2Cat` 或 `SignTool` 时，脚本查找 Downloads 和构建缓存里的同名 NuGet 包，或从微软 NuGet 下载相应工具包。每个包的 90 秒预算包含与 Hexagon SDK 共用的 Schannel 重试。若 curl 传输超时（退出码 28），脚本在剩余预算内用 Windows PowerShell 再取一次。脚本核对 SHA-256 并在本轮日志目录解包工具及依赖。[微软 WDK NuGet 说明](https://learn.microsoft.com/windows-hardware/drivers/install-the-wdk-using-nuget) · [curl 的吊销检查参数](https://curl.se/docs/manpage.html#--ssl-revoke-best-effort)
 
 工具或签名失败时，报告会打印原因和待签的 `v73 package` 目录。可以把匹配的 `libggml-htp.cat` 放回该目录，也可将 `GGML_HEXAGON_LIBHTP_DIR` 指向包含同一 SHA-256 算子库及其签名 catalog 的目录。已有 PFX 环境仍可设置 `HEXAGON_HTP_CERT` 使用上游构建签名路径。[固定版本的上游 Windows 说明](https://github.com/ggml-org/llama.cpp/blob/e412c6f468b7b9e0f16f2540244236f8ad68e9ae/docs/backend/snapdragon/windows.md)
 
 对同一条 `zh-plain-1.wav`，GGML 路线仅测 HTP0 Target-only 和 HTP0 Target 配 Q4 DFlash。音频投影及可选草稿都在 Adreno。每个测试启动独立服务，比对两个 HTP 请求的完整 token 序列和转录文本。同轮有 GPU 校准转录时也复用其 token 和文本进行对照。GGML Hexagon 还要求请求开始后出现有非零周期的 DSP 算子记录。GGML 调度器可能将部分计算放在主机上。每个测试的 `.txt` 保存原始日志，`.metrics.json` 保存文本、token 和计时。摘要中的 request tok/s 使用生成 token 数（排除 EOS）除以 HTTP 请求时间，包括音频预填充和解码，排除启动加载时间。HTP 测试打开了设备 profiling。
+
+对自签信任做前后对照时，用同一条命令跑两次。第一次报告给出公钥证书 `htp-signer.cer`、签名指纹、有效期、本机证书库和可读取的 BCD 测试签名设置。设备管理员核对原始指纹，通过设备适用的测试签名流程配置该公钥证书。在 Windows 测试设备上，上游使用本地计算机的 Trusted Root Certification Authorities 和 Trusted Publishers。启动策略的变更和重启由管理员处理。使用相同命令复测，报告在服务、库和目录文件哈希均匹配时并列列出最近一次结果及当前 HTP0 Target-only 结果。证书过期或包变更时重新建立基线。[llama.cpp Windows 测试签名说明](https://github.com/ggml-org/llama.cpp/blob/e412c6f468b7b9e0f16f2540244236f8ad68e9ae/docs/backend/snapdragon/windows.md)
 
 ## 完整 Target 回放
 
