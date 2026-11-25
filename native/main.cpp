@@ -43,7 +43,7 @@ static int run(const std::vector<std::string> & arguments) {
     if (arguments.size() == 2 && arguments[1] == "--help") {
         std::cout << "qwen3_asr_server --supervised --host 127.0.0.1 --port 0 "
                      "--model-directory DIR [--draft-model-path DIR --draft-bits 4|6|8] "
-                     "[--backend auto|cpu|opencl|hexagon] [--cache-limit-mb MB]\n";
+                     "[--backend auto|cpu|opencl|hexagon] [--draft-backend opencl|hexagon] [--cache-limit-mb MB]\n";
         return 0;
     }
 
@@ -56,6 +56,7 @@ static int run(const std::vector<std::string> & arguments) {
         common_print_available_devices();
         return 0;
     }
+    std::string draft_backend;
     bool supervised = false;
     for (size_t i = 1; i < arguments.size(); ++i) {
         const auto & flag = arguments[i];
@@ -77,6 +78,8 @@ static int run(const std::vector<std::string> & arguments) {
             port = value;
         } else if (flag == "--backend") {
             backend = value;
+        } else if (flag == "--draft-backend") {
+            draft_backend = value;
         } else if ((flag == "--host" && value == "127.0.0.1") ||
                    (flag == "--model-kind" && value == "qwen3_asr") ||
                    flag == "--startup-timeout-s" || flag == "--cache-limit-mb" ||
@@ -94,6 +97,10 @@ static int run(const std::vector<std::string> & arguments) {
         throw std::invalid_argument("invalid supervised, Draft bits or backend option");
     }
 
+    if (!draft_backend.empty() && ((draft_backend != "hexagon" && draft_backend != "opencl") ||
+            draft_directory.empty() || (backend != "opencl" && backend != "hexagon"))) {
+        throw std::invalid_argument("--draft-backend requires a draft model and an explicit accelerator backend");
+    }
     constexpr auto model_name = "Qwen3-ASR-1.7B";
     std::vector<std::string> options = {
         arguments.front(), "--model", model_file(directory, "target.gguf"),
@@ -113,7 +120,7 @@ static int run(const std::vector<std::string> & arguments) {
     } else if (backend == "opencl" || backend == "hexagon") {
         const auto target_device = backend == "hexagon" ? "HTP0" : "GPUOpenCL";
         options.insert(options.end(), {"--device", target_device, "--n-gpu-layers", "all",
-                                        "--spec-draft-device", "GPUOpenCL", "--spec-draft-ngl", "all",
+                                        "--spec-draft-device", draft_backend == "hexagon" ? "HTP0" : "GPUOpenCL", "--spec-draft-ngl", "all",
                                         "--mmproj-device", "GPUOpenCL"});
     }
     std::vector<char *> option_values;
@@ -141,7 +148,7 @@ static int run(const std::vector<std::string> & arguments) {
         routes.update_meta(context);
         std::atomic<bool> stopping = false;
         http.post("/v1/audio/transcriptions", [&](const server_http_req & request) {
-            if (backend == "hexagon") {
+            if (backend == "hexagon" || draft_backend == "hexagon") {
                 LOG_INF("voxt: GGML Hexagon audio request started\n");
             }
             return routes.voxt_transcriptions(request, stopping);

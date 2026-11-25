@@ -10,6 +10,9 @@ param(
     [string]$LiveVerifyDirectory,
     [switch]$Draft,
     [ValidateSet('opencl', 'hexagon')][string]$Backend = 'opencl',
+    [ValidateSet('opencl','hexagon')][string]$DraftBackend,
+    [int]$WorkerId,
+    [switch]$MeasurePlacement,
     [string]$HexagonOpsDirectory
 )
 
@@ -41,7 +44,27 @@ function Invoke-ClipProbe([int]$Port, [string]$Audio) {
         $form.Add([Net.Http.StringContent]::new('true'), 'include_generation_metadata')
         $form.Add([Net.Http.StringContent]::new('256'), 'max_new_tokens')
         $timer = [Diagnostics.Stopwatch]::StartNew()
-        $response = $client.PostAsync("http://127.0.0.1:$Port/v1/audio/transcriptions", $form).GetAwaiter().GetResult()
+        $pending = $client.PostAsync("http://127.0.0.1:$Port/v1/audio/transcriptions", $form)
+        $peakPrivate = 0L
+        $peakWorking = 0L
+        if ($MeasurePlacement) {
+            $processes = @($child)
+            if ($WorkerId) { $processes += [Diagnostics.Process]::GetProcessById($WorkerId) }
+            try {
+                do {
+                    $private = 0L
+                    $working = 0L
+                    foreach ($process in $processes) {
+                        $process.Refresh()
+                        $private += $process.PrivateMemorySize64
+                        $working += $process.WorkingSet64
+                    }
+                    $peakPrivate = [Math]::Max($peakPrivate,$private)
+                    $peakWorking = [Math]::Max($peakWorking,$working)
+                } until ($pending.Wait(50))
+            } finally { if ($WorkerId) { $processes[1].Dispose() } }
+        }
+        $response = $pending.GetAwaiter().GetResult()
         try {
             $body = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
             $timer.Stop()
@@ -56,7 +79,9 @@ function Invoke-ClipProbe([int]$Port, [string]$Audio) {
             $meta = $done.generation_metadata
             if ($MetricsPath) {
                 [ordered]@{text=$done.text; ids=@($meta.token_ids); tokens=$meta.generated_token_count;
-                    wall_ms=$timer.Elapsed.TotalMilliseconds; finish=$meta.finish_reason;
+                    peak_private_bytes=$peakPrivate; peak_working_bytes=$peakWorking;
+                    draft_ms=$meta.draft_ms; verify_ms=$meta.target_ms; context_ms=$meta.draft_context_ms;
+                    accepted=$meta.accepted_draft_token_count; wall_ms=$timer.Elapsed.TotalMilliseconds; finish=$meta.finish_reason;
                     rounds=$meta.verify_round_count; live_rounds=$meta.live_verify_round_count; proposed=$meta.proposed_draft_token_count} |
                     ConvertTo-Json -Depth 4 | Set-Content -Encoding UTF8 -LiteralPath $MetricsPath
             }
@@ -114,6 +139,7 @@ function Invoke-ClipProbe([int]$Port, [string]$Audio) {
         $start = [Diagnostics.ProcessStartInfo]::new($server)
         $start.Arguments = '--supervised --host 127.0.0.1 --port 0 --backend ' + $Backend + ' --model-directory "' + $models + '"'
         if ($Draft) { $start.Arguments += ' --draft-model-path "' + $models + '" --draft-bits 4' }
+        if ($DraftBackend) { $start.Arguments += " --draft-backend $DraftBackend" }
         $start.WorkingDirectory = $root
         $start.UseShellExecute = $false
         $start.RedirectStandardInput = $true
@@ -122,7 +148,8 @@ function Invoke-ClipProbe([int]$Port, [string]$Audio) {
         $start.StandardOutputEncoding = [Text.Encoding]::UTF8
         $start.StandardErrorEncoding = [Text.Encoding]::UTF8
         $start.EnvironmentVariables['LLAMA_ARG_LOG_VERBOSITY'] = '5'
-        if ($Backend -eq 'hexagon') {
+        if ($MeasurePlacement) { $start.EnvironmentVariables['VOXT_TRACE_INTERDEVICE_COPY'] = '1' }
+        if ($Backend -eq 'hexagon' -or $DraftBackend -eq 'hexagon') {
             $start.EnvironmentVariables['GGML_HEXAGON_DEVICES'] = 'HTP0'
             $start.EnvironmentVariables['GGML_HEXAGON_PROFILE'] = '1'
             $ops = $HexagonOpsDirectory

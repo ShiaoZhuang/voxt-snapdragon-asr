@@ -1,12 +1,14 @@
 [CmdletBinding()]
 param(
+    [switch]$PlacementMatrix,
     [Parameter(Mandatory)][string]$InstallDirectory,
     [Parameter(Mandatory)][string]$BuildDirectory,
     [Parameter(Mandatory)][string]$LogDirectory,
     [Parameter(Mandatory)][AllowEmptyCollection()][System.Collections.Generic.List[string]]$Summary
 )
 $ErrorActionPreference = 'Stop'
-$Summary.Add('GGML Hexagon | zh-plain-1 | target on HTP0, audio and optional Q4 draft on Adreno')
+if ($PlacementMatrix) { $Summary.Add('GGML placement | zh-plain-1 | audio on Adreno | GPU and HTP0 Target/Draft') }
+else { $Summary.Add('GGML Hexagon | zh-plain-1 | target on HTP0, audio and optional Q4 draft on Adreno') }
 try {
     $active = & (Join-Path $PSScriptRoot 'get_active_testsigning.ps1')
     $Summary.Add("Active kernel test signing: $active")
@@ -115,6 +117,11 @@ foreach ($run in $previousRuns) {
         $Summary.Add("Previous same server/SO/CAT ($($run.Name)): trust $($prior.trust) | HTP0 $($prior.target)")
         break
     }
+}
+
+if ($PlacementMatrix) {
+    & (Join-Path $PSScriptRoot 'measure_placement.ps1') -InstallDirectory $InstallDirectory -Product $product -Ops $ops -LogDirectory $LogDirectory -Summary $Summary
+    return
 }
 
 $gpuMetricsPath = Join-Path $LogDirectory 'live-calibration.txt.metrics.json'

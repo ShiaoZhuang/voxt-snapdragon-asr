@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <set>
@@ -60,6 +61,7 @@ void read(std::istream & file, T * data, size_t count) {
 }
 
 inline void verify(llm_graph_result * res, const llama_ubatch & batch) {
+    const auto began = std::chrono::steady_clock::now();
     const auto root = directory();
     auto * graph = res->get_gf();
     auto * mask_tensor = ggml_graph_get_tensor(graph, "attn_inp_kq_mask");
@@ -139,7 +141,9 @@ inline void verify(llm_graph_result * res, const llama_ubatch & batch) {
             write(out, cache.data() + slot * kv_width, kv_width);
         }
     }
+    const auto sent = static_cast<long long>(out.tellp());
     out.close();
+    const auto published = std::chrono::steady_clock::now();
     std::filesystem::rename(staging, request);
 
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
@@ -148,6 +152,7 @@ inline void verify(llm_graph_result * res, const llama_ubatch & batch) {
         require(std::chrono::steady_clock::now() < deadline, "live verifier timed out");
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
+    const auto received = std::chrono::steady_clock::now();
     std::vector<ggml_fp16_t> kv(caches.size() * rows * kv_width);
     std::vector<float> aux(outputs.size() * rows * width), scores(rows * vocab);
     std::ifstream in(response, std::ios::binary);
@@ -170,5 +175,13 @@ inline void verify(llm_graph_result * res, const llama_ubatch & batch) {
         ggml_backend_tensor_set(outputs[i], aux.data() + i * rows * width, 0, rows * width * sizeof(float));
     }
     ggml_backend_tensor_set(logits, scores.data(), 0, scores.size() * sizeof(float));
+    if (std::getenv("VOXT_TRACE_INTERDEVICE_COPY")) {
+        using micros = std::chrono::microseconds;
+        const auto bytes = kv.size() * sizeof(kv[0]) + (aux.size() + scores.size()) * sizeof(float);
+        std::fprintf(stderr, "voxt: verify IPC bytes %lld %zu us prepare %lld wait %lld apply %lld\n", sent, bytes,
+            (long long) std::chrono::duration_cast<micros>(published - began).count(),
+            (long long) std::chrono::duration_cast<micros>(received - published).count(),
+            (long long) std::chrono::duration_cast<micros>(std::chrono::steady_clock::now() - received).count());
+    }
 }
 }

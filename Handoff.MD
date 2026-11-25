@@ -17,7 +17,7 @@ if ($LASTEXITCODE -eq 0) { git restore --source=FETCH_HEAD -- scripts/win-arm64/
 
 启动器会显示正在运行的阶段、错误和每 30 秒的等待提示。验证阶段超过 35 分钟会退出并保留已有报告。可用 `-Route QnnLive` 单独跑混合转录对照，或用 `-Route GgmlHexagon` 单独跑 GGML。
 
-当前固定入口先用同一条 `zh-plain-1.wav` 比较全 GPU DFlash 和 GPU + QNN HTP DFlash 的完整请求，再运行独立的 GGML Hexagon 验证。QNN 回放已通过，完整请求使用现有的 ARM64 QNN Python 环境。两条路线分别报告结果。GGML 的准备步骤受阻时直接记录具体错误并结束该路线。请拍最后的 **VOXT SNAPDRAGON REPORT**，若一屏放不下，请分两张。无需重跑 31 条 CPU 基准。
+当前固定入口先测试六种 GGML Target/Draft 组合，再比较全 GPU DFlash 和 GPU + QNN HTP 八位置验证。两项均使用同一条 `zh-plain-1.wav`。QNN 回放已通过，完整请求使用现有的 ARM64 QNN Python 环境。两条路线分别报告结果。GGML 的准备步骤受阻时直接记录具体错误并结束该路线。请拍最后的 **VOXT SNAPDRAGON REPORT**，若一屏放不下，请分两张。无需重跑 31 条 CPU 基准。
 
 ## GPU + QNN HTP 转录
 
@@ -43,7 +43,7 @@ if ($LASTEXITCODE -eq 0) { git restore --source=FETCH_HEAD -- scripts/win-arm64/
 
 工具或签名失败时，报告会打印原因和待签的 `v73 package` 目录。可以把匹配的 `libggml-htp.cat` 放回该目录，也可将 `GGML_HEXAGON_LIBHTP_DIR` 指向包含同一 SHA-256 算子库及其签名 catalog 的目录。已有 PFX 环境仍可设置 `HEXAGON_HTP_CERT` 使用上游构建签名路径。[固定版本的上游 Windows 说明](https://github.com/ggml-org/llama.cpp/blob/e412c6f468b7b9e0f16f2540244236f8ad68e9ae/docs/backend/snapdragon/windows.md)
 
-对同一条 `zh-plain-1.wav`，GGML 路线仅测 HTP0 Target-only 和 HTP0 Target 配 Q4 DFlash。音频投影及可选草稿都在 Adreno。每个测试启动独立服务，比对两个 HTP 请求的完整 token 序列和转录文本。同轮有 GPU 校准转录时也复用其 token 和文本进行对照。GGML Hexagon 还要求请求开始后出现有非零周期的 DSP 算子记录。GGML 调度器可能将部分计算放在主机上。每个测试的 `.txt` 保存原始日志，`.metrics.json` 保存文本、token 和计时。摘要中的 request tok/s 使用生成 token 数（排除 EOS）除以 HTTP 请求时间，包括音频预填充和解码，排除启动加载时间。HTP 测试打开了设备 profiling。
+对同一条 `zh-plain-1.wav`，单独选择 `-Route GgmlHexagon` 时测 HTP0 Target-only 和 HTP0 Target 配 Q4 DFlash。音频投影及可选草稿都在 Adreno。每个测试启动独立服务，比对两个 HTP 请求的完整 token 序列和转录文本。同轮有 GPU 校准转录时也复用其 token 和文本进行对照。GGML Hexagon 还要求请求开始后出现有非零周期的 DSP 算子记录。GGML 调度器可能将部分计算放在主机上。每个测试的 `.txt` 保存原始日志，`.metrics.json` 保存文本、token 和计时。摘要中的 request tok/s 使用生成 token 数（排除 EOS）除以 HTTP 请求时间，包括音频预填充和解码，排除启动加载时间。HTP 测试打开了设备 profiling。
 
 对自签信任做前后对照时，用同一条命令跑两次。第一次报告给出公钥证书 `htp-signer.cer`、签名指纹、有效期、本机证书库和可读取的 BCD 测试签名设置。设备管理员核对原始指纹，通过设备适用的测试签名流程配置该公钥证书。在 Windows 测试设备上，上游使用本地计算机的 Trusted Root Certification Authorities 和 Trusted Publishers。在允许设备测试签名的机器上，可在仓库根目录的管理员 PowerShell 运行报告中带完整指纹的 `Elevated setup from repo root` 命令。脚本只接受本项目导出且指纹匹配、有效的代码签名公钥证书，导入后为当前启动项设置 TESTSIGNING。若启动配置写入失败，脚本回滚本次新增的证书。手动重启后，普通 PowerShell 的 GGML 报告中 `Active kernel test signing: True` 表示当前运行的内核允许测试签名。该模式影响整机。使用相同命令复测，报告在服务、库和目录文件哈希均匹配时并列列出最近一次结果及当前 HTP0 Target-only 结果。证书过期或包变更时重新建立基线。[llama.cpp Windows 测试签名说明](https://github.com/ggml-org/llama.cpp/blob/e412c6f468b7b9e0f16f2540244236f8ad68e9ae/docs/backend/snapdragon/windows.md)
 
@@ -124,3 +124,9 @@ git switch --detach veri-1-opencl-fix
 
 
 通过 GitHub 获取 Veri 1 时，请在源码仓库根目录运行新版 `.\scripts\win-arm64\run_verify.ps1 -Quick`。它会直接使用已组装的官方安装目录，也可以用 `-InstallDirectory` 指向自定义安装目录。
+
+## Target 和 Draft 设备组合实测
+
+在 Windows ARM64 仓库根目录运行 `.\scripts\win-arm64\update_and_verify.ps1`（不带参数）。GGML 先在同一份 Hexagon + OpenCL 主机上轮换测试 GPU/HTP 两种 Target-only 和四种 Target/Draft 组合。音频投影始终使用 GPU。每种运行三次，每次重启服务，使用同一条 zh-plain-1 和相同模型。按请求吞吐中位数报告，模型初始化不计入 TPS。脚本检查模型加载的设备名、输出文本和完整 token，含 HTP 的路线还检查请求内 DSP 算子事件。一种组合失败会记录日志并继续其他组合。每轮指标保存在 placement.csv，原始日志保留模型、KV、计算缓冲区分配和每个阶段的请求指标。
+
+随后测试 GPU prefill、GPU 草稿和 QNN 满八位置 Target 验证。QNN worker 初始化一次，三次请求各自重启 ASR 服务；通过累计设备事件和逐次完整 token 对照验收。报告记录文件交换字节数及准备、等待 worker、读回应用的耗时，等待包含推理。GGML 的跨设备数字仅覆盖可识别的同步 tensor copy，不包含所有驱动搬运或排队。内存为请求期间按 50 ms 间隔采样的进程私有提交量和工作集峰值，混合路线计入同一时刻的 ASR 服务和 QNN worker；工作集之和可能重复计算共享页。设备驱动驻留和初始化峰值不在该指标内。

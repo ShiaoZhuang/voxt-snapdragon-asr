@@ -17,13 +17,15 @@ if ($FullReplay) {
 $notes = [System.Collections.Generic.List[string]]::new()
 $failures = @()
 foreach ($step in @(
-    @{ Id='QnnLive'; Name='QNN live'; Script='verify_live_qnn.ps1' },
-    @{ Id='GgmlHexagon'; Name='GGML Hexagon'; Script='verify_ggml_hexagon.ps1' }
+    @{ Id='GgmlHexagon'; Name='GGML Hexagon'; Script='verify_ggml_hexagon.ps1' },
+    @{ Id='QnnLive'; Name='QNN live'; Script='verify_live_qnn.ps1' }
 )) {
     if ($Route -ne 'All' -and $Route -ne $step.Id) { continue }
     Write-Host "[voxt] Starting $($step.Name)."
     try {
-        & (Join-Path $PSScriptRoot $step.Script) @paths -Summary $notes
+        $extra = @{}
+        if ($Route -eq 'All') { $extra.PlacementMatrix = $true }
+        & (Join-Path $PSScriptRoot $step.Script) @paths @extra -Summary $notes
     } catch {
         $failures += $step.Name
         $notes.Add("$($step.Name): INCOMPLETE | $($_.Exception.Message)")

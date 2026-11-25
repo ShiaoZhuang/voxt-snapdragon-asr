@@ -602,3 +602,25 @@ diff --git a/src/llama-context.cpp b/src/llama-context.cpp
  #    ifdef GGML_BACKEND_BUILD
  #        define HTPDRV_API __declspec(dllexport) extern
  #    else
+--- a/ggml/src/ggml-backend.cpp
++++ b/ggml/src/ggml-backend.cpp
+@@ -839,3 +839,9 @@
++    static const bool trace = getenv("VOXT_TRACE_INTERDEVICE_COPY") != nullptr;
++    const char * from = trace ? ggml_backend_buffer_name(src->buffer) : "";
++    const char * to   = trace ? ggml_backend_buffer_name(dst->buffer) : "";
++    const bool cross = trace && ((strstr(from, "HTP") && strstr(to, "OpenCL")) ||
++                                 (strstr(to, "HTP") && strstr(from, "OpenCL")));
++    const int64_t start = cross ? ggml_time_us() : 0;
+     if (ggml_backend_buffer_is_host(src->buffer)) {
+         ggml_backend_tensor_set(dst, src->data, 0, ggml_nbytes(src));
+     } else if (ggml_backend_buffer_is_host(dst->buffer)) {
+@@ -849,5 +855,9 @@
+         ggml_backend_tensor_get(src, data, 0, nbytes);
+         ggml_backend_tensor_set(dst, data, 0, nbytes);
+         free(data);
++    }
++    if (cross) {
++        fprintf(stderr, "voxt: sync GPU/HTP copy %zu bytes %lld us\n", ggml_nbytes(src),
++                (long long) (ggml_time_us() - start));
+     }
+ }
