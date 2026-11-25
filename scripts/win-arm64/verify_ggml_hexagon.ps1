@@ -40,11 +40,13 @@ foreach ($name in @('hexagon-target', 'hexagon-draft')) {
     Write-Host "[voxt] Running $name."
     $path = Join-Path $LogDirectory "$name.txt"
     $draft = $name -like '*-draft'
+    $sessionOpenFailed = $false
     try {
         & (Join-Path $PSScriptRoot 'probe_opencl_startup.ps1') -InstallDirectory $InstallDirectory -NativeBuildDirectory $product `
             -ReportPath $path -MetricsPath "$path.metrics.json" -Backend hexagon -Transcribe -Draft:$draft -HexagonOpsDirectory $ops | Out-Host
         $lines = Get-Content -Encoding UTF8 -LiteralPath $path
         if (!($lines -match '^Transcription probe: PASS$') -or !($lines -match '^Exit code: 0 \(0x00000000\)$')) {
+            $sessionOpenFailed = [bool]($lines -match 'HTP0 failed to open session')
             $last = @($lines -match 'Startup probe error|Transcription probe: FAIL|No ready event|failed|error:|Exit code:' |
                 Select-Object -First 4)
             throw "Transcription incomplete. $($last -join ' | ')"
@@ -77,6 +79,10 @@ foreach ($name in @('hexagon-target', 'hexagon-draft')) {
     } catch {
         $failed += $name
         $Summary.Add("${name}: FAIL | $($_.Exception.Message)")
+        if (!$draft -and $sessionOpenFailed) {
+            $Summary.Add('hexagon-draft: skipped because the same HTP0 library failed to open for Target-only.')
+            break
+        }
     }
 }
 if ($failed.Count) { throw "Incomplete steps: $($failed -join ', '). See the details above." }

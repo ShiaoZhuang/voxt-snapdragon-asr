@@ -23,7 +23,7 @@ if ($LASTEXITCODE -eq 0) { git restore --source=FETCH_HEAD -- scripts/win-arm64/
 
 脚本先采集一批全 GPU 的八位置验证张量，为短上下文下的 28 层量化图确定形状与激活范围。采集和构建会话在计时前完成。先测混合转录，取得实际 HTP 执行记录后才测一次全 GPU DFlash 对照。两条测速请求均使用相同的模型、音频和 Q4 草稿配置。需要已有实机回放创建的 ARM64 QNN Python 环境。
 
-混合路径用 GPU 执行音频预填充、Target prefill、草稿和不足八位置的批次。满八位置时，现有解码器把实际位置、token 和活动历史 KV 交给 QNN worker。worker 用 HTP 执行 28 层，主机处理 token embedding 和词表输出层。K/V、三处 Draft 辅助状态和 logits 写回原解码器，原接受、拒绝与回滚逻辑继续负责提交顺序。首次实现逐轮通过本地文件传输张量，全部等待、搬运、主机输出层和 QNN 执行时间计入请求 TPS。会话的固定历史容量按报告显示，超出容量会报对应错误。
+混合路径用 GPU 执行音频预填充、Target prefill、草稿和不足八位置的批次。满八位置时，现有解码器把实际位置、token 和活动历史 KV 交给 QNN worker。worker 把 28 层按顺序分成四个七层 QNN 会话，逐组初始化并报告进度。每组的隐藏状态传给下一组，报告逐组核对 HTP 执行次数。worker 用 HTP 执行 28 层，主机处理 token embedding 和词表输出层。K/V、三处 Draft 辅助状态和 logits 写回原解码器，原接受、拒绝与回滚逻辑继续负责提交顺序。首次实现逐轮通过本地文件传输张量，全部等待、搬运、主机输出层和 QNN 执行时间计入请求 TPS。会话的固定历史容量按报告显示，超出容量会报对应错误。
 
 报告只有在完整 token 序列和转录文本一致、服务与 worker 的满批轮数一致且有 QAIRT 执行记录时给出吞吐倍率。日志目录保存两个请求的计时、转录及 profiler 报告。
 

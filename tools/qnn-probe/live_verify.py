@@ -20,14 +20,14 @@ from replay_target import read_head, write_json
 LAYERS, ROWS, WIDTH, VOCAB = 28, 8, 2048, 151936
 
 
-def calibrate(target, aux, capture, model_path, *, cpu_test=False):
+def calibrate(target, aux, capture, model_path, layers, *, cpu_test=False):
     inputs, outputs, nodes, initializers = [], [], [], []
     previous = "residual"
-    for layer in range(LAYERS):
+    for layer in layers:
         folder = capture / f"layer-{layer}" if layer else capture
         graph, feeds, _ = prepare(folder, target, None, full=True, layer=layer, activation_code_limit=24576,
                                   allow_reference_mismatch=True, live=True, live_cpu=cpu_test)
-        if layer == 0:
+        if layer == layers.start:
             cache_shape = feeds["past_key"].shape
             inputs += [deepcopy(item) for item in graph.input
                        if item.name in {"residual", "attn_mask", "rope_cos", "rope_sin"}]
@@ -51,7 +51,7 @@ def calibrate(target, aux, capture, model_path, *, cpu_test=False):
         previous = next_state
         print(f"Calibrated layer {layer + 1}/{LAYERS}", flush=True)
     outputs += [helper.make_tensor_value_info(f"hidden_{i}", TensorProto.FLOAT16, [ROWS, WIDTH])
-                for i in aux + [LAYERS]]
+                for i in sorted(set(aux + [layers.stop])) if layers.start < i <= layers.stop]
     model = helper.make_model(helper.make_graph(nodes, "voxt_target_verify", inputs, outputs, initializers),
                               opset_imports=[helper.make_opsetid("", 23)], ir_version=10)
     onnx.save_model(model, model_path, save_as_external_data=True, all_tensors_to_one_file=True,
@@ -113,22 +113,32 @@ def serve(args):
     aux = list(gguf.GGUFReader(args.draft).get_field("dflash.target_layers").contents())
     if aux != [2, 14, 25]:
         raise ValueError(f"unsupported DFlash auxiliary layers: {aux}")
-    model = folder / "target-verify.onnx"
-    capacity = calibrate(target, aux, args.capture, model, cpu_test=args.cpu_test)
-    print("Initializing verification runtime", flush=True)
-    if args.cpu_test:
-        options = ort.SessionOptions()
-        options.intra_op_num_threads = 4
-        session = ort.InferenceSession(str(model), sess_options=options, providers=["CPUExecutionProvider"])
-        run_options = None
-    else:
+    sessions = []
+    capacity = None
+    if not args.cpu_test:
         import onnxruntime_qnn as qnn
         ort.register_execution_provider_library(QNN_PROVIDER, qnn.get_library_path())
-        options, run_options, _ = htp_session_options(qnn, folder / "profile")
-        session = ort.InferenceSession(str(model), sess_options=options, enable_fallback=False)
-        if QNN_PROVIDER not in session.get_providers():
-            raise RuntimeError("QNN HTP provider missing from the verification session")
-    write_json(folder / "ready.json", {"history_capacity": capacity})
+    for start_layer in range(0, LAYERS, 7):
+        layers = range(start_layer, start_layer + 7)
+        model = folder / f"target-verify-{start_layer}.onnx"
+        size = calibrate(target, aux, args.capture, model, layers, cpu_test=args.cpu_test)
+        if capacity is not None and size != capacity:
+            raise ValueError("inconsistent group history capacities")
+        capacity = size
+        print(f"Initializing layers {start_layer + 1}-{layers.stop}/{LAYERS}", flush=True)
+        if args.cpu_test:
+            options = ort.SessionOptions()
+            options.intra_op_num_threads = 4
+            session = ort.InferenceSession(str(model), sess_options=options, providers=["CPUExecutionProvider"])
+            run_options = None
+        else:
+            options, run_options, _ = htp_session_options(qnn, folder / f"profile-{start_layer}")
+            session = ort.InferenceSession(str(model), sess_options=options, enable_fallback=False)
+            if QNN_PROVIDER not in session.get_providers():
+                raise RuntimeError("QNN HTP provider missing from the verification session")
+        sessions.append((session, run_options, layers.stop))
+        print(f"Ready layers {start_layer + 1}-{layers.stop}/{LAYERS}", flush=True)
+    write_json(folder / "ready.json", {"history_capacity": capacity, "groups": len(sessions)})
     count = 0
     try:
         while not (folder / "stop").exists():
@@ -142,7 +152,13 @@ def serve(args):
             names = [f"L{i}_{kind}" for i in range(LAYERS) for kind in ("K", "V")] + [
                 f"hidden_{i}" for i in aux + [LAYERS]]
             start = time.perf_counter()
-            values = session.run(names, feeds, run_options)
+            outputs = {}
+            for session, run_options, end_layer in sessions:
+                group_feeds = {item.name: feeds[item.name] for item in session.get_inputs()}
+                group_names = [item.name for item in session.get_outputs()]
+                outputs.update(zip(group_names, session.run(group_names, group_feeds, run_options)))
+                feeds["residual"] = outputs[f"hidden_{end_layer}"]
+            values = [outputs[name] for name in names]
             print(f"Round {count + 1} graph: {(time.perf_counter() - start) * 1000:.2f} ms", flush=True)
             logits = normalize(values[-1].astype(np.float32), norm, epsilon) @ weights.T
             if any(not np.isfinite(x).all() for x in [*values, logits]):
@@ -157,8 +173,10 @@ def serve(args):
             exchange_io("publish verifier response", lambda: stage.replace(folder / "response.bin"))
             count += 1
     finally:
-        events = 0 if args.cpu_test else htp_execute_events(session.end_profiling())
-        write_json(folder / "worker_report.json", {"rounds": count, "qaairt_execute_events": events})
+        events = [0 if args.cpu_test else htp_execute_events(session.end_profiling())
+                  for session, _, _ in sessions]
+        write_json(folder / "worker_report.json", {"rounds": count, "group_executes": events,
+                                                   "qaairt_execute_events": sum(events)})
 
 
 def main():

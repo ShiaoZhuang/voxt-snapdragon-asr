@@ -67,12 +67,20 @@ Write-Host '[voxt] Calibrating and initializing the QNN verifier (up to 12 minut
 $worker = Start-Process @processArgs
 try {
     $deadline = (Get-Date).AddMinutes(12)
+    $lastProgress = $null
+    $nextUpdate = Get-Date
     while (!(Test-Path -LiteralPath (Join-Path $workerDirectory 'ready.json') -PathType Leaf)) {
         if ($worker.HasExited -or (Get-Date) -ge $deadline) {
             $detail = if (Test-Path -LiteralPath $workerError) {
                 (Get-Content -Raw -LiteralPath $workerError | ConvertFrom-Json).error
             } else { @(Get-Content -LiteralPath $workerOut,$workerStderr -Tail 2) -join ' | ' }
-            throw "QNN worker did not become ready. $detail"
+            $reason = if ($worker.HasExited) { "exited with code $($worker.ExitCode)" } else { 'reached the 12-minute initialization limit' }
+            throw "QNN worker $reason. $detail"
+        }
+        if ((Get-Date) -ge $nextUpdate) {
+            $progress = Get-Content -LiteralPath $workerOut -Tail 1 -ErrorAction SilentlyContinue
+            if ($progress -and $lastProgress -ne $progress) { Write-Host "[voxt] QNN: $progress"; $lastProgress = $progress }
+            $nextUpdate = (Get-Date).AddSeconds(5)
         }
         Start-Sleep -Milliseconds 250
     }
@@ -86,14 +94,15 @@ try {
         if (!$worker.WaitForExit(30000)) { $worker.Kill(); $worker.WaitForExit() }
     }
     $worker.Dispose()
-    foreach ($name in @('target-verify.onnx', 'target-verify.onnx.data')) {
-        Remove-Item -LiteralPath (Join-Path $workerDirectory $name) -Force -ErrorAction SilentlyContinue
-    }
+    Get-ChildItem -LiteralPath $workerDirectory -Filter 'target-verify-*.onnx*' -File |
+        Remove-Item -Force -ErrorAction SilentlyContinue
 }
 $profile = Get-Content -Raw -LiteralPath (Join-Path $workerDirectory 'worker_report.json') | ConvertFrom-Json
 $Summary.Add(('GPU + HTP DFlash | {0} tokens | {1:F0} ms | {2:F2} request tok/s | {3}/{4} HTP rounds | {5} DSP executes' -f
     $hybrid.Metrics.tokens, $hybrid.Metrics.wall_ms, $hybrid.Rate, $hybrid.LiveRounds, $hybrid.Metrics.rounds, $profile.qaairt_execute_events))
-if ($hybrid.LiveRounds -lt 1 -or $hybrid.LiveRounds -gt $hybrid.Metrics.rounds -or $profile.rounds -ne $hybrid.LiveRounds -or $profile.qaairt_execute_events -lt $profile.rounds) {
+$groupEvents = @($profile.group_executes)
+$Summary.Add("QNN DSP executes per seven-layer group: $($groupEvents -join ', ')")
+if ($groupEvents.Count -ne 4 -or @($groupEvents | Where-Object { $_ -lt $hybrid.LiveRounds }).Count -or $hybrid.LiveRounds -lt 1 -or $hybrid.LiveRounds -gt $hybrid.Metrics.rounds -or $profile.rounds -ne $hybrid.LiveRounds -or $profile.qaairt_execute_events -lt $profile.rounds) {
     throw 'Missing device execution evidence for live Target verification.'
 }
 Write-Host '[voxt] Measuring the all-GPU DFlash reference.'
