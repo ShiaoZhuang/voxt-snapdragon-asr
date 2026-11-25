@@ -12,22 +12,14 @@ try {
     $Summary.Add("Active kernel test signing: $active")
 } catch { $Summary.Add("Active kernel test signing: unknown | $($_.Exception.Message)") }
 & (Join-Path $PSScriptRoot 'verify_replay_assets.ps1') -InstallDirectory $InstallDirectory
+$package = $env:VOXT_HTP_PACKAGE
+if ($package -and $package -notin 'native','official') { throw "Unknown VOXT_HTP_PACKAGE: $package (use official or native)." }
+$official = $package -ne 'native'
 Write-Host '[voxt] Checking the Hexagon SDK and building GGML Hexagon.'
-& (Join-Path $PSScriptRoot 'build_native.ps1') -BuildDirectory $BuildDirectory -BackendOnly -Hexagon -InstallHexagonSdk | Out-Host
+& (Join-Path $PSScriptRoot 'build_native.ps1') -BuildDirectory $BuildDirectory -BackendOnly -Hexagon -InstallHexagonSdk -ExternalHtpOps:$official | Out-Host
 $product = Join-Path $BuildDirectory 'hexagon'
 $Summary.Add('GGML Hexagon native Windows build: PASS')
 $manifest = Get-Content -LiteralPath (Join-Path $product 'verify_native_manifest.json') -Raw | ConvertFrom-Json
-if ($manifest.htp_build_error) { throw "llama.cpp DSP build failed | $($manifest.htp_build_error)" }
-if (!$manifest.htp_ops -or !$manifest.htp_ops_sha256) { throw 'The native build manifest has no v73 DSP library.' }
-$Summary.Add("llama.cpp DSP build: PASS | v73 package: $($manifest.htp_ops)")
-
-$ops = $manifest.htp_ops
-if ($env:GGML_HEXAGON_LIBHTP_DIR) { $ops = $env:GGML_HEXAGON_LIBHTP_DIR }
-$ops = (Resolve-Path -LiteralPath $ops).Path
-$library = Join-Path $ops 'libggml-htp-v73.so'
-if ((Get-FileHash -LiteralPath $library -Algorithm SHA256).Hash -ne $manifest.htp_ops_sha256) {
-    throw 'The signed directory must contain the v73 DSP library produced by this llama.cpp build.'
-}
 function Get-CatalogSigner([string]$Path) {
     Add-Type -AssemblyName System.Security
     $cms = [Security.Cryptography.Pkcs.SignedCms]::new()
@@ -39,32 +31,50 @@ function Get-CatalogSigner([string]$Path) {
 $trialSignerId = $null
 $previousRuns = @(Get-ChildItem -LiteralPath (Split-Path -Parent $LogDirectory) -Directory |
     Where-Object { $_.FullName -ne $LogDirectory } | Sort-Object Name -Descending)
-if (!(Test-Path -LiteralPath (Join-Path $ops 'libggml-htp.cat')) -and
-    !$env:VOXT_HTP_SIGNING_THUMBPRINT -and !$env:GGML_HEXAGON_LIBHTP_DIR) {
-    # Past trials retain their public catalog after their temporary private key is removed.
-    foreach ($run in $previousRuns) {
-        $trial = Join-Path $run.FullName 'htp-v73-self-signed'
-        $oldCat = Join-Path $trial 'libggml-htp.cat'
-        if (!(Test-Path -LiteralPath $oldCat -PathType Leaf)) { continue }
-        $oldReport = Join-Path $run.FullName 'workflow_summary.txt'
-        if (!(Test-Path -LiteralPath $oldReport)) { continue }
-        try { $oldSigner = Get-CatalogSigner $oldCat } catch { continue }
-        if (!$oldSigner -or $oldSigner.NotAfter -le (Get-Date)) { continue }
-        if (!(Select-String -LiteralPath $oldReport -Pattern "^HTP signing mode: temporary self-signed \| $($oldSigner.Thumbprint)$" -Quiet)) { continue }
-        $oldLib = Join-Path $trial 'libggml-htp-v73.so'
-        $oldInf = Join-Path $trial 'libggml-htp.inf'
-        if (!(Test-Path -LiteralPath $oldLib) -or !(Test-Path -LiteralPath $oldInf)) { continue }
-        if ((Get-FileHash -LiteralPath $oldLib).Hash -eq $manifest.htp_ops_sha256 -and
-            (Get-FileHash -LiteralPath $oldInf).Hash -eq (Get-FileHash -LiteralPath (Join-Path $ops 'libggml-htp.inf')).Hash) {
-            $trialSignerId = $oldSigner.Thumbprint
-            $ops = $trial
-            break
+if ($official) {
+    $release = (Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot '../../sources.lock.json') | ConvertFrom-Json).geniex_htp
+    Write-Host '[voxt] Resolving the Microsoft-signed v73 library from the GenieX installation or pinned SDK package.'
+    $ops = & (Join-Path $PSScriptRoot 'get_ggml_htp_bundle.ps1') -CacheDirectory (Join-Path $BuildDirectory 'sdk/geniex-htp') -Release $release
+    $Summary.Add("HTP package: official GenieX | v73 SO/CAT match $($release.version)")
+} else {
+    if ($manifest.htp_build_error) { throw "llama.cpp DSP build failed | $($manifest.htp_build_error)" }
+    if (!$manifest.htp_ops -or !$manifest.htp_ops_sha256) { throw 'The native build manifest has no v73 DSP library.' }
+    $Summary.Add("llama.cpp DSP build: PASS | v73 package: $($manifest.htp_ops)")
+
+    $ops = $manifest.htp_ops
+    if ($env:GGML_HEXAGON_LIBHTP_DIR) { $ops = $env:GGML_HEXAGON_LIBHTP_DIR }
+    $ops = (Resolve-Path -LiteralPath $ops).Path
+    $library = Join-Path $ops 'libggml-htp-v73.so'
+    if ((Get-FileHash -LiteralPath $library -Algorithm SHA256).Hash -ne $manifest.htp_ops_sha256) {
+        throw 'The signed directory must contain the v73 DSP library produced by this llama.cpp build.'
+    }
+    if (!(Test-Path -LiteralPath (Join-Path $ops 'libggml-htp.cat')) -and
+        !$env:VOXT_HTP_SIGNING_THUMBPRINT -and !$env:GGML_HEXAGON_LIBHTP_DIR) {
+        # Past trials retain their public catalog after their temporary private key is removed.
+        foreach ($run in $previousRuns) {
+            $trial = Join-Path $run.FullName 'htp-v73-self-signed'
+            $oldCat = Join-Path $trial 'libggml-htp.cat'
+            if (!(Test-Path -LiteralPath $oldCat -PathType Leaf)) { continue }
+            $oldReport = Join-Path $run.FullName 'workflow_summary.txt'
+            if (!(Test-Path -LiteralPath $oldReport)) { continue }
+            try { $oldSigner = Get-CatalogSigner $oldCat } catch { continue }
+            if (!$oldSigner -or $oldSigner.NotAfter -le (Get-Date)) { continue }
+            if (!(Select-String -LiteralPath $oldReport -Pattern "^HTP signing mode: temporary self-signed \| $($oldSigner.Thumbprint)$" -Quiet)) { continue }
+            $oldLib = Join-Path $trial 'libggml-htp-v73.so'
+            $oldInf = Join-Path $trial 'libggml-htp.inf'
+            if (!(Test-Path -LiteralPath $oldLib) -or !(Test-Path -LiteralPath $oldInf)) { continue }
+            if ((Get-FileHash -LiteralPath $oldLib).Hash -eq $manifest.htp_ops_sha256 -and
+                (Get-FileHash -LiteralPath $oldInf).Hash -eq (Get-FileHash -LiteralPath (Join-Path $ops 'libggml-htp.inf')).Hash) {
+                $trialSignerId = $oldSigner.Thumbprint
+                $ops = $trial
+                break
+            }
         }
     }
+    $ops = & (Join-Path $PSScriptRoot 'sign_htp_catalog.ps1') -PackageDirectory $ops `
+        -TrialDirectory (Join-Path $LogDirectory 'htp-v73-self-signed') `
+        -ToolCacheDirectory (Join-Path $BuildDirectory 'sdk/windows-signing-tools') -Summary $Summary
 }
-$ops = & (Join-Path $PSScriptRoot 'sign_htp_catalog.ps1') -PackageDirectory $ops `
-    -TrialDirectory (Join-Path $LogDirectory 'htp-v73-self-signed') `
-    -ToolCacheDirectory (Join-Path $BuildDirectory 'sdk/windows-signing-tools') -Summary $Summary
 $Summary.Add("HTP library directory: $ops")
 $catPath = Join-Path $ops 'libggml-htp.cat'
 $catHash = (Get-FileHash -LiteralPath $catPath).Hash
@@ -96,7 +106,7 @@ try {
     $setting = @($settings -match '^\s*testsigning\s+' | Select-Object -First 1)
     $Summary.Add("BCD current testsigning: $(if ($setting.Count) { $setting[0].Trim() } else { 'not listed' })")
 } catch { $Summary.Add("BCD current testsigning: unknown | $($_.Exception.Message)") }
-$comparison = [ordered]@{library=$manifest.htp_ops_sha256; catalog=$catHash; server=$serverHash; trust=$trust; target='incomplete'}
+$comparison = [ordered]@{library=(Get-FileHash -LiteralPath (Join-Path $ops 'libggml-htp-v73.so')).Hash; catalog=$catHash; server=$serverHash; trust=$trust; target='incomplete'}
 foreach ($run in $previousRuns) {
     $record = Join-Path $run.FullName 'htp-target-check.json'
     if (!(Test-Path -LiteralPath $record -PathType Leaf)) { continue }
@@ -120,6 +130,8 @@ foreach ($name in @('hexagon-target', 'hexagon-draft')) {
         & (Join-Path $PSScriptRoot 'probe_opencl_startup.ps1') -InstallDirectory $InstallDirectory -NativeBuildDirectory $product `
             -ReportPath $path -MetricsPath "$path.metrics.json" -Backend hexagon -Transcribe -Draft:$draft -HexagonOpsDirectory $ops | Out-Host
         $lines = Get-Content -Encoding UTF8 -LiteralPath $path
+        $session = @($lines -match 'ggml-hex: HTP0 new session :') | Select-Object -Last 1
+        if ($session) { $Summary.Add("${name} HTP0 session: OPEN | $session") }
         if (!($lines -match '^Transcription probe: PASS$') -or !($lines -match '^Exit code: 0 \(0x00000000\)$')) {
             $sessionOpenFailed = [bool]($lines -match 'HTP0 failed to open session')
             $last = @($lines -match 'Startup probe error|Transcription probe: FAIL|No ready event|failed|error:|Exit code:' |

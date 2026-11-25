@@ -33,7 +33,9 @@ if ($LASTEXITCODE -eq 0) { git restore --source=FETCH_HEAD -- scripts/win-arm64/
 
 官网 ZIP 解压后可把 `HEXAGON_SDK_ROOT` 指向包含 `build/cmake/hexagon_fun.cmake` 的版本目录。该 SDK 缺少 Windows 可选扩展时，GGML 会在构建目录应用与 Community Edition Windows 发行包相同的兼容设置，也会识别 ZIP 中 `WinNT` 目录的 IDL 编译器。兼容处理保留原 SDK 文件。[上游 Windows SDK 补丁](https://github.com/snapdragon-toolchain/hexagon-sdk/blob/v6.7.0.0/patches/wos-patch)
 
-脚本从同一份固定 llama.cpp 源码构建 Windows 服务和 v73 DSP 算子库。已有 catalog 时复用。缺少 catalog 时，脚本检查 Windows 的 `CurrentUser\My` 和 `LocalMachine\My`，优先选有效且带私钥的当前用户代码签名证书。可用 `VOXT_HTP_SIGNING_THUMBPRINT` 指定证书指纹。找到可用证书后，使用 WDK 的 `Inf2Cat` 生成 catalog，用 `SignTool` 签名并验证 v73 算子库和 INF 的目录成员关系，然后尝试 HTP0 转录。最终以设备加载结果和实际请求的 DSP profiler 为准。[Inf2Cat](https://learn.microsoft.com/en-us/windows-hardware/drivers/devtest/inf2cat) · [SignTool](https://learn.microsoft.com/en-us/windows/win32/seccrypto/signtool)
+普通 PowerShell 在仓库根目录运行 `.\scripts\win-arm64\update_and_verify.ps1 -Route GgmlHexagon`。默认由本项目服务运行转录，DSP 使用 Qualcomm GenieX 官方原版 v73 库和配套签名目录。脚本核对两个文件的 SHA-256，从 GenieX CLI 安装目录或构建缓存取用；未找到时读取 Downloads 内的官方 SDK ZIP，或自动下载并校验 v0.12.0 ZIP。无需导入自签证书。报告列出选用目录、Windows 验签、HTP0 会话、请求内 DSP 算子事件和请求 TPS。[官方发布包](https://github.com/qualcomm/GenieX/releases/tag/v0.12.0)
+
+自定义 DSP kernel 实验可在当前终端设 `$env:VOXT_HTP_PACKAGE='native'`，再跑相同命令。清除该变量即可恢复官方库。以下签名流程用于自编库模式。该模式从同一份固定 llama.cpp 源码构建 Windows 服务和 v73 DSP 算子库。已有 catalog 时复用。缺少 catalog 时，脚本检查 Windows 的 `CurrentUser\My` 和 `LocalMachine\My`，优先选有效且带私钥的当前用户代码签名证书。可用 `VOXT_HTP_SIGNING_THUMBPRINT` 指定证书指纹。找到可用证书后，使用 WDK 的 `Inf2Cat` 生成 catalog，用 `SignTool` 签名并验证 v73 算子库和 INF 的目录成员关系，然后尝试 HTP0 转录。最终以设备加载结果和实际请求的 DSP profiler 为准。[Inf2Cat](https://learn.microsoft.com/en-us/windows-hardware/drivers/devtest/inf2cat) · [SignTool](https://learn.microsoft.com/en-us/windows/win32/seccrypto/signtool)
 
 两个证书库都找不到合适的证书时，脚本使用当前用户的临时自签名证书试跑。自签包保存在该轮日志目录，签名后清理临时证书和私钥。下次优先复用同一份有效自签包，核对库和 INF 的哈希及原运行记录的签名指纹。新生成的测试证书有效期为七天。即使通用签名验证返回错误，也会用正常 HTP 加载路径实测，并保留原始错误。[PowerShell 测试证书文档](https://learn.microsoft.com/en-us/powershell/module/pki/new-selfsignedcertificate)
 

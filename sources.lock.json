@@ -1,4 +1,15 @@
 {
+  "geniex_htp": {
+    "version": "v0.12.0",
+    "llama_cpp": "93cf736a8d1d46aa922e27eb64aa712bcd5ebc30",
+    "test_host_revision": "e412c6f468b7b9e0f16f2540244236f8ad68e9ae",
+    "url": "https://github.com/qualcomm/GenieX/releases/download/v0.12.0/geniex-sdk-windows-arm64-v0.12.0.zip",
+    "sha256": "0420541ea042b1d4a784b4a363a05c711cd83f871b1acdc44b3f21f093d20cf4",
+    "files": {
+      "libggml-htp.cat": "cbff7cbfa391f0a79c78432572ef926bbbc07c9d6889ddd21e2a4e48ffa3a8e9",
+      "libggml-htp-v73.so": "43786e2aa9ebc70cb17a879c1ff821263cb1fc4a673ca08720c7be25a8aa0ddd"
+    }
+  },
   "hexagon_sdk": {
     "version": "6.7.0.0",
     "url": "https://github.com/snapdragon-toolchain/hexagon-sdk/releases/download/v6.7.0.0/hexagon-sdk-v6.7.0.0-arm64-wos.tar.xz",

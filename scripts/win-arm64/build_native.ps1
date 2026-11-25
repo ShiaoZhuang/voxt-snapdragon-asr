@@ -5,7 +5,8 @@ param(
     [switch]$ToolchainCheck,
     [switch]$BackendOnly,
     [switch]$Hexagon,
-    [switch]$InstallHexagonSdk
+    [switch]$InstallHexagonSdk,
+    [switch]$ExternalHtpOps
 )
 
 $ErrorActionPreference = 'Stop'
@@ -220,8 +221,9 @@ $backendFlags = @('-DGGML_NATIVE=OFF', '-DGGML_CPU_ARM_ARCH=armv8.2-a+dotprod', 
 if ($Hexagon) {
     $llamaBuild = Join-Path $product "llama-$patchId"
     # An approved PFX can use the upstream signing target.
+    $buildCert = if (!$ExternalHtpOps) { $env:HEXAGON_HTP_CERT }
     $backendFlags += @('-DGGML_HEXAGON=ON', '-DPREBUILT_LIB_DIR=windows_aarch64', "-DHEXAGON_SDK_ROOT=$sdk",
-        "-DHEXAGON_TOOLS_ROOT=$sdkTools", "-DGGML_HEXAGON_HTP_CERT=$env:HEXAGON_HTP_CERT")
+        "-DHEXAGON_TOOLS_ROOT=$sdkTools", "-DGGML_HEXAGON_HTP_CERT=$buildCert")
 }
 Invoke-BuildTool cmake (@('-S', $llama, '-B', $llamaBuild) + $cmakeFlags + $backendFlags + @(
     '-DBUILD_SHARED_LIBS=OFF', "-DOpenCL_INCLUDE_DIR=$headers", "-DOpenCL_LIBRARY=$(Join-Path $icdBuild 'OpenCL.lib')",
@@ -242,7 +244,7 @@ $manifest = [ordered]@{
     opencl_loader=$lock.opencl.loader.commit; opencl_headers=$lock.opencl.headers.commit
     toolchain=$toolchainVersion; build=($backendFlags -notlike '-DGGML_HEXAGON_HTP_CERT=*') -join ' '; files=$files
 }
-if ($Hexagon) {
+if ($Hexagon -and !$ExternalHtpOps) {
     $opsBuild = Join-Path $llamaBuild 'ggml/src/ggml-hexagon'
     $opsName = 'libggml-htp-v73.so'
     try {
