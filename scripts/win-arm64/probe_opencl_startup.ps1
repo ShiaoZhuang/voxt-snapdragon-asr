@@ -81,6 +81,7 @@ function Invoke-ClipProbe([int]$Port, [string]$Audio) {
             if ($MetricsPath) {
                 [ordered]@{text=$done.text; ids=@($meta.token_ids); tokens=$meta.generated_token_count;
                     peak_private_bytes=$peakPrivate; peak_working_bytes=$peakWorking;
+                    audio_encoder_us=$meta.audio_encoder_us; audio_encoder_htp_events=$meta.audio_encoder_htp_events;
                     draft_ms=$meta.draft_ms; verify_ms=$meta.target_ms; context_ms=$meta.draft_context_ms;
                     accepted=$meta.accepted_draft_token_count; wall_ms=$timer.Elapsed.TotalMilliseconds; finish=$meta.finish_reason;
                     rounds=$meta.verify_round_count; live_rounds=$meta.live_verify_round_count; proposed=$meta.proposed_draft_token_count} |

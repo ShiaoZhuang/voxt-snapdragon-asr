@@ -165,11 +165,13 @@
      int32_t n_keep    =  0; // number of tokens to keep from initial prompt
 --- a/tools/server/server-common.h
 +++ b/tools/server/server-common.h
-@@ -447,6 +447,12 @@
+@@ -447,6 +447,14 @@
      uint64_t n_draft_tokens      = 0;
      uint64_t n_draft_accepted    = 0;
      uint64_t n_draft_verif_steps = 0;
 +
++    int64_t voxt_audio_microseconds = 0;
++    uint64_t voxt_audio_htp_events = 0;
 +    int64_t voxt_draft_microseconds   = 0;
 +    int64_t voxt_verify_microseconds  = 0;
 +    int32_t voxt_live_verify_rounds   = 0;
@@ -191,24 +193,73 @@ diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
  #include <atomic>
  #include <thread>
  #include "base64.hpp"
-@@ -912,7 +917,16 @@
+@@ -883,9 +888,19 @@
+     }
+ };
+
++struct voxt_audio_measurement {
++    int64_t us = 0;
++    uint64_t htp_events = 0;
++
++    void add_to(server_slot_stats & stats) const {
++        stats.voxt_audio_microseconds += us;
++        stats.voxt_audio_htp_events += htp_events;
++    }
++};
++
+ // encode the mtmd chunk at idx, batched with as many of the next chunks as possible
+ // returns 0 on success
+-static int encode_mtmd_chunk(const server_slot & slot, mtmd::batch_ptr & mbatch, size_t idx) {
++static int encode_mtmd_chunk(const server_slot & slot, mtmd::batch_ptr & mbatch, size_t idx, voxt_audio_measurement & audio) {
+     const auto & mctx = slot.mctx;
+     const auto & input_tokens = slot.task->tokens;
+     const auto & chunk = input_tokens.find_chunk(idx);
+@@ -912,7 +927,26 @@
      // TODO @ngxson : move this log line to debug when it become more stable
      SLT_TRC(slot, "encoding mtmd batch from idx = %zu, n_chunks = %d\n", idx, n_added);
 
-+    const bool trace_audio = slot.task->params.voxt_final && std::getenv("VOXT_ASR_TRACE");
++    // Read the host-side HTP profiler on either side of the synchronous encoder.
++    // This ASR server runs a single slot, so Target and Draft cannot overlap this window.
++    const bool trace_audio = slot.task->params.voxt_final && voxt_trace_enabled();
++    using count_fn = uint64_t (*)();
++    count_fn count_ops = nullptr;
 +    if (trace_audio) {
-+        std::fprintf(stderr, "voxt: audio encoder begin\n");
++        if (auto dev = ggml_backend_dev_by_name("HTP0")) {
++            count_ops = reinterpret_cast<count_fn>(ggml_backend_reg_get_proc_address(
++                ggml_backend_dev_backend_reg(dev), "voxt_htp0_profiled_ops"));
++        }
 +    }
++    const uint64_t ops_before = count_ops ? count_ops() : 0;
 +    const int64_t start_us = trace_audio ? ggml_time_us() : 0;
      res = mtmd_batch_encode(mbatch.get());
-+    if (trace_audio) {
-+        std::fprintf(stderr, "voxt: audio encoder end us %lld status %d\n",
-+                     (long long) (ggml_time_us() - start_us), res);
++    if (trace_audio && res == 0) {
++        audio.us = ggml_time_us() - start_us;
++        if (count_ops) {
++            audio.htp_events = count_ops() - ops_before;
++        }
 +    }
      if (res != 0) {
          SLT_ERR(slot, "failed to encode mtmd batch for chunk idx = %zu, res = %d\n", idx, res);
          return -1;
-@@ -1093,6 +1107,7 @@
+@@ -926,7 +960,7 @@
+ // note: this is not a member of server_slot because we want to run it inside yield_to_queue
+ //       slot is passed as const to avoid accidental modification of the slot state
+ //       some pointers are allowed to be used, they are not used by to_json()
+-static int process_mtmd_chunk(const server_slot & slot, mtmd::batch_ptr & mbatch, size_t idx, size_t & n_tokens_out) {
++static int process_mtmd_chunk(const server_slot & slot, mtmd::batch_ptr & mbatch, size_t idx, size_t & n_tokens_out, voxt_audio_measurement & audio) {
+     GGML_ASSERT(slot.mctx);
+     const auto & mctx = slot.mctx;
+     const auto & input_tokens = slot.task->tokens;
+@@ -993,7 +1027,7 @@
+
+     // otherwise, the batch is either uninitialized or is used up
+     // we need to create & encode a new batch
+-    if (encode_mtmd_chunk(slot, mbatch, idx) != 0) {
++    if (encode_mtmd_chunk(slot, mbatch, idx, audio) != 0) {
+         return -1;
+     }
+
+@@ -1093,6 +1127,7 @@
      // use server_context methods instead
 
      common_params params_base;
@@ -216,7 +267,7 @@ diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
 
      // note: keep these alive - they determine the lifetime of the model, context, etc.
      common_init_result_ptr llama_init;
-@@ -1323,6 +1338,7 @@
+@@ -1323,6 +1358,7 @@
              params_base.load_progress_callback_user_data = &load_progress_text;
          }
 
@@ -224,7 +275,7 @@ diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
          llama_init = common_init_from_params(params_base);
 
          model_tgt = llama_init->model();
-@@ -2207,7 +2223,17 @@
+@@ -2207,7 +2243,17 @@
              }
          }
 
@@ -243,7 +294,7 @@ diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
              slot.stop           = STOP_TYPE_EOS;
              slot.has_next_token = false;
 
-@@ -3879,9 +3905,20 @@
+@@ -3879,9 +3925,20 @@
 
          // generate the actual drafts (if any)
          if (!drafting.empty()) {
@@ -264,7 +315,33 @@ diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
          }
 
          // make checkpoints if needed
-@@ -4644,11 +4681,50 @@
+@@ -4375,9 +4432,11 @@
+                         // encode on the worker thread, so we can still handle metrics tasks
+                         size_t n_tokens_out = 0;
+                         int32_t res = 0;
++                        voxt_audio_measurement audio;
+                         queue_tasks.yield_to_queue([&]() {
+-                            res = process_mtmd_chunk(slot, slot.mbatch, cur_token_idx, n_tokens_out);
++                            res = process_mtmd_chunk(slot, slot.mbatch, cur_token_idx, n_tokens_out, audio);
+                         });
++                        audio.add_to(slot.stats);
+
+                         if (res != 0) {
+                             SLT_ERR(slot, "failed to process mtmd chunk, res = %d\n", res);
+@@ -4588,9 +4647,11 @@
+             if (!embd) {
+                 // encode on the worker thread, so we can still handle metrics tasks
+                 int32_t res = 0;
++                voxt_audio_measurement audio;
+                 queue_tasks.yield_to_queue([&]() {
+-                    res = encode_mtmd_chunk(slot, slot.mbatch, cur_token_idx);
++                    res = encode_mtmd_chunk(slot, slot.mbatch, cur_token_idx, audio);
+                 });
++                audio.add_to(slot.stats);
+                 embd = res == 0 ? mtmd_batch_get_output_embd(slot.mbatch.get(), chunk.get()) : nullptr;
+             }
+
+@@ -4644,11 +4705,50 @@
 
          // yield to the queue, so we can still handle metrics tasks while decoding
          // note: the sync is done here too, so that the wait is also covered by the yield
@@ -315,7 +392,7 @@ diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
              }
          });
 
-@@ -4711,7 +4787,12 @@
+@@ -4711,7 +4811,12 @@
          if (spec) {
              bool ok = true;
              queue_tasks.yield_to_queue([&]() {
@@ -328,7 +405,7 @@ diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
              });
 
              if (!ok) {
-@@ -4953,6 +5034,14 @@
+@@ -4953,6 +5058,14 @@
                      SLT_INF(slot, "accepted %2zu/%2zu draft tokens\n", accepted.size() - 1, n_draft);
                  }
 
@@ -343,7 +420,7 @@ diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
                  common_speculative_accept(spec.get(), slot.id, accepted.size() - 1);
 
                  slot.spec_draft = std::move(accepted);
-@@ -5156,9 +5245,9 @@
+@@ -5156,9 +5269,9 @@
      return impl->load_model(params);
  }
 
@@ -355,7 +432,7 @@ diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
  }
 
  void server_context::terminate() {
-@@ -5271,6 +5360,8 @@
+@@ -5271,6 +5384,8 @@
  //
  // server_routes
  //
@@ -644,3 +721,36 @@ diff --git a/src/llama-context.cpp b/src/llama-context.cpp
 +                (long long) (ggml_time_us() - start));
      }
  }
+--- a/ggml/src/ggml-hexagon/ggml-hexagon.cpp
++++ b/ggml/src/ggml-hexagon/ggml-hexagon.cpp
+@@ -218,11 +218,20 @@
+     }
+ }
+
++static std::atomic<uint64_t> voxt_htp0_ops{0};
++
++static uint64_t voxt_htp0_profiled_ops() {
++    return voxt_htp0_ops.load(std::memory_order_relaxed);
++}
++
+ static void ggml_hexagon_dump_op_prof(const char * sess_name, const htp_opnode & node, const htp_prof_desc & pd) {
+     if (!opt_profile) return;
+
+     uint32_t op_usec = pd.usecs;
+     uint32_t op_cycles = pd.cycles_stop - pd.cycles_start;
++    if (op_cycles && strcmp(sess_name, "HTP0") == 0) {
++        voxt_htp0_ops.fetch_add(1, std::memory_order_relaxed);
++    }
+     const uint32_t * pmu = pd.pmu;
+
+     char pmu_str[256] = "";
+@@ -3373,6 +3382,9 @@
+
+ static void * ggml_backend_hexagon_get_proc_address(ggml_backend_reg_t reg, const char * name) {
+     GGML_UNUSED(reg);
++    if (strcmp(name, "voxt_htp0_profiled_ops") == 0) {
++        return (void *) voxt_htp0_profiled_ops;
++    }
+     if (strcmp(name, "ggml_backend_split_buffer_type") == 0) {
+         return (void *) ggml_backend_hexagon_split_buffer_type;
+     }

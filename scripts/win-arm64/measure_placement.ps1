@@ -67,24 +67,9 @@ for ($rep = 0; $rep -lt 3; $rep++) {
             $events = 0
             $copyBytes = 0L
             $copyUs = 0L
-            $inAudio = $false
-            $audioUs = 0L
-            $audioEvents = 0
             $inRequest = $false
             foreach ($line in $lines) {
                 if ($line -match 'voxt: GGML Hexagon audio request started') { $inRequest = $true }
-                if ($AudioComparison) {
-                    if ($line -match '^voxt: audio encoder begin$') {
-                        if ($inAudio) { throw 'Audio encoder timing has overlapping batches.' }
-                        $inAudio = $true
-                    } elseif ($line -match '^voxt: audio encoder end us (\d+) status 0$') {
-                        if (!$inAudio) { throw 'Missing audio encoder start.' }
-                        $audioUs += [long]$Matches[1]
-                        $inAudio = $false
-                    } elseif ($inAudio -and $line -match 'ggml-hex: HTP0 profile-op (?!OPBATCH).*\|usec [0-9]+ cycles [1-9][0-9]*') {
-                        $audioEvents++
-                    }
-                }
                 if (!$inRequest) { continue }
                 if ($line -match 'ggml-hex: HTP0 profile-op (?!OPBATCH).*\|usec [0-9]+ cycles [1-9][0-9]*') { $events++ }
                 if ($line -match 'voxt: sync GPU/HTP copy (\d+) bytes (\d+) us') {
@@ -100,8 +85,12 @@ for ($rep = 0; $rep -lt 3; $rep++) {
                 sync_copy_bytes=$copyBytes; sync_copy_us=$copyUs; dsp_events=$events; draft_ms=$m.draft_ms;
                 verify_ms=$m.verify_ms; context_ms=$m.context_ms; rounds=$m.rounds; accepted=$m.accepted; proposed=$m.proposed}
             if ($AudioComparison) {
-                if ($inAudio -or $audioUs -le 0 -or $audioUs -gt $m.wall_ms * 1000) { throw 'Invalid or missing in-request audio encoding time.' }
-                if ($case.Audio -eq 'hexagon' -and !$audioEvents) { throw 'No HTP0 operator executed during audio encoding.' }
+                $audioUs = [long]$m.audio_encoder_us
+                $audioEvents = $m.audio_encoder_htp_events
+                if ($audioUs -le 0 -or $audioUs -gt $m.wall_ms * 1000 -or $null -eq $audioEvents) {
+                    throw "Invalid encoder metadata: us=$($m.audio_encoder_us), events=$audioEvents, request_ms=$($m.wall_ms)."
+                }
+                if ($case.Audio -eq 'hexagon' -and !$audioEvents) { throw "No HTP0 operator executed during audio encoding (encoder_us=$audioUs, request_ms=$($m.wall_ms))." }
                 $row | Add-Member -NotePropertyMembers @{audio_backend=$case.Audio; audio_ms=$audioUs/1000.0;
                     audio_pct=100.0*$audioUs/(1000.0*$m.wall_ms); audio_htp_events=$audioEvents}
             }

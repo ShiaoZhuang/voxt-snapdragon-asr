@@ -83,6 +83,8 @@ static json voxt_done(server_task_result_cmpl_final & final, const llama_vocab *
                {"proposed_draft_token_count", stats.n_draft_tokens},
                {"accepted_draft_token_count", stats.n_draft_accepted}};
         if (voxt_trace_enabled()) {
+            gen["audio_encoder_us"] = stats.voxt_audio_microseconds;
+            gen["audio_encoder_htp_events"] = stats.voxt_audio_htp_events;
             gen["token_ids"] = generated_ids;
             gen["first_verify_rounds"] = stats.voxt_first_rounds;
         }
