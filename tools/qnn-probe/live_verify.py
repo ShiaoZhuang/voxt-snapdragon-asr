@@ -3,6 +3,7 @@
 import argparse
 from copy import deepcopy
 import json
+import os
 from pathlib import Path
 import secrets
 import socket
@@ -159,7 +160,7 @@ def serve(args):
             listener.settimeout(0.25)
             write_json(folder / "ready.json", {
                 "history_capacity": capacity, "groups": len(sessions), "transport": "loopback-v1",
-                "port": listener.getsockname()[1], "token": token,
+                "port": listener.getsockname()[1], "token": token, "pid": os.getpid(),
             })
             while not (folder / "stop").exists():
                 try:

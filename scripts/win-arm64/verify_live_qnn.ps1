@@ -111,11 +111,16 @@ try {
     }
     $ready = Get-Content -Raw -LiteralPath (Join-Path $workerDirectory 'ready.json') | ConvertFrom-Json
     $Summary.Add("QNN verifier ready | history capacity $($ready.history_capacity) tokens | transport $($ready.transport)")
+    $verifierId = [int]$ready.pid
+    if ($PlacementMatrix) {
+        if ($verifierId -le 0) { throw 'Missing QNN verifier PID for request memory sampling.' }
+        $Summary.Add("QNN memory sampling | verifier PID $verifierId | launcher PID $($worker.Id)")
+    }
     Write-Host '[voxt] Measuring GPU + HTP DFlash.'
     $trials = if ($PlacementMatrix) { 3 } else { 1 }
     $hybrids = @(for ($trial = 1; $trial -le $trials; $trial++) {
         $name = if ($trial -eq 1) { 'live-qnn-dflash' } else { "live-qnn-dflash-$trial" }
-        $run = Invoke-LiveClip $name $workerDirectory $worker.Id
+        $run = Invoke-LiveClip $name $workerDirectory $verifierId
         if ($run.LiveRounds -lt 1 -or $run.LiveRounds -gt $run.Metrics.rounds) { throw "$name missing full HTP verification rounds." }
         $run
     })
