@@ -1,5 +1,11 @@
 #pragma once
 
+// Winsock includes Windows headers in the llama-context.cpp translation unit.
+// Keep the SDK's min/max macros out of llama.cpp's std::min/std::max calls.
+#if defined(_WIN32) && !defined(NOMINMAX)
+#define NOMINMAX
+#endif
+
 #include <algorithm>
 #include <cerrno>
 #include <cstdint>
