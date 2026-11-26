@@ -1,13 +1,15 @@
 [CmdletBinding()]
 param(
     [switch]$PlacementMatrix,
+    [switch]$AudioComparison,
     [Parameter(Mandatory)][string]$InstallDirectory,
     [Parameter(Mandatory)][string]$BuildDirectory,
     [Parameter(Mandatory)][string]$LogDirectory,
     [Parameter(Mandatory)][AllowEmptyCollection()][System.Collections.Generic.List[string]]$Summary
 )
 $ErrorActionPreference = 'Stop'
-if ($PlacementMatrix) { $Summary.Add('GGML placement | zh-plain-1 | audio on Adreno | GPU and HTP0 Target/Draft') }
+if ($AudioComparison) { $Summary.Add('Audio encoder placement | zh-plain-1 | same GGML build | 3 requests per configuration') }
+elseif ($PlacementMatrix) { $Summary.Add('GGML placement | zh-plain-1 | audio on Adreno | GPU and HTP0 Target/Draft') }
 else { $Summary.Add('GGML Hexagon | zh-plain-1 | target on HTP0, audio and optional Q4 draft on Adreno') }
 try {
     $active = & (Join-Path $PSScriptRoot 'get_active_testsigning.ps1')
@@ -119,8 +121,8 @@ foreach ($run in $previousRuns) {
     }
 }
 
-if ($PlacementMatrix) {
-    & (Join-Path $PSScriptRoot 'measure_placement.ps1') -InstallDirectory $InstallDirectory -Product $product -Ops $ops -LogDirectory $LogDirectory -Summary $Summary
+if ($PlacementMatrix -or $AudioComparison) {
+    & (Join-Path $PSScriptRoot 'measure_placement.ps1') -AudioComparison:$AudioComparison -InstallDirectory $InstallDirectory -Product $product -Ops $ops -LogDirectory $LogDirectory -Summary $Summary
     return
 }
 

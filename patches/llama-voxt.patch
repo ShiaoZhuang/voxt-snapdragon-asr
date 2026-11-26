@@ -191,7 +191,24 @@ diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
  #include <atomic>
  #include <thread>
  #include "base64.hpp"
-@@ -1093,6 +1098,7 @@
+@@ -912,7 +917,16 @@
+     // TODO @ngxson : move this log line to debug when it become more stable
+     SLT_TRC(slot, "encoding mtmd batch from idx = %zu, n_chunks = %d\n", idx, n_added);
+
++    const bool trace_audio = slot.task->params.voxt_final && std::getenv("VOXT_ASR_TRACE");
++    if (trace_audio) {
++        std::fprintf(stderr, "voxt: audio encoder begin\n");
++    }
++    const int64_t start_us = trace_audio ? ggml_time_us() : 0;
+     res = mtmd_batch_encode(mbatch.get());
++    if (trace_audio) {
++        std::fprintf(stderr, "voxt: audio encoder end us %lld status %d\n",
++                     (long long) (ggml_time_us() - start_us), res);
++    }
+     if (res != 0) {
+         SLT_ERR(slot, "failed to encode mtmd batch for chunk idx = %zu, res = %d\n", idx, res);
+         return -1;
+@@ -1093,6 +1107,7 @@
      // use server_context methods instead
 
      common_params params_base;
@@ -199,7 +216,7 @@ diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
 
      // note: keep these alive - they determine the lifetime of the model, context, etc.
      common_init_result_ptr llama_init;
-@@ -1323,6 +1329,7 @@
+@@ -1323,6 +1338,7 @@
              params_base.load_progress_callback_user_data = &load_progress_text;
          }
 
@@ -207,7 +224,7 @@ diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
          llama_init = common_init_from_params(params_base);
 
          model_tgt = llama_init->model();
-@@ -2207,7 +2214,17 @@
+@@ -2207,7 +2223,17 @@
              }
          }
 
@@ -226,7 +243,7 @@ diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
              slot.stop           = STOP_TYPE_EOS;
              slot.has_next_token = false;
 
-@@ -3879,9 +3896,20 @@
+@@ -3879,9 +3905,20 @@
 
          // generate the actual drafts (if any)
          if (!drafting.empty()) {
@@ -247,7 +264,7 @@ diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
          }
 
          // make checkpoints if needed
-@@ -4644,11 +4672,50 @@
+@@ -4644,11 +4681,50 @@
 
          // yield to the queue, so we can still handle metrics tasks while decoding
          // note: the sync is done here too, so that the wait is also covered by the yield
@@ -298,7 +315,7 @@ diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
              }
          });
 
-@@ -4711,7 +4778,12 @@
+@@ -4711,7 +4787,12 @@
          if (spec) {
              bool ok = true;
              queue_tasks.yield_to_queue([&]() {
@@ -311,7 +328,7 @@ diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
              });
 
              if (!ok) {
-@@ -4953,6 +5025,14 @@
+@@ -4953,6 +5034,14 @@
                      SLT_INF(slot, "accepted %2zu/%2zu draft tokens\n", accepted.size() - 1, n_draft);
                  }
 
@@ -326,7 +343,7 @@ diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
                  common_speculative_accept(spec.get(), slot.id, accepted.size() - 1);
 
                  slot.spec_draft = std::move(accepted);
-@@ -5156,9 +5236,9 @@
+@@ -5156,9 +5245,9 @@
      return impl->load_model(params);
  }
 
@@ -338,7 +355,7 @@ diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
  }
 
  void server_context::terminate() {
-@@ -5271,6 +5351,8 @@
+@@ -5271,6 +5360,8 @@
  //
  // server_routes
  //

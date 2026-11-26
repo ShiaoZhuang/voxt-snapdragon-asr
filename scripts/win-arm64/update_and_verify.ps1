@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [string]$InstallDirectory,
-    [ValidateSet('All', 'QnnLive', 'GgmlHexagon')][string]$Route = 'All'
+    [ValidateSet('AudioEncoder', 'All', 'QnnLive', 'GgmlHexagon')][string]$Route = 'AudioEncoder'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -143,7 +143,7 @@ try {
     $build = Join-Path $root 'build/win-arm64-native'
     $workflowArgs = @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', $workflow,
         '-InstallDirectory', $InstallDirectory, '-BuildDirectory', $build, '-LogDirectory', $logs)
-    if ($Route -ne 'All') { $workflowArgs += @('-Route', $Route) }
+    if ($Route -ne 'AudioEncoder') { $workflowArgs += @('-Route', $Route) }
     $status = Invoke-LoggedProcess $pwsh $workflowArgs 'workflow' 2100
     if ($status -ne 0) {
         $stderr = Join-Path $logs 'workflow.stderr.log'

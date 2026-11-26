@@ -17,7 +17,9 @@ if ($LASTEXITCODE -eq 0) { git restore --source=FETCH_HEAD -- scripts/win-arm64/
 
 启动器会显示正在运行的阶段、错误和每 30 秒的等待提示。验证阶段超过 35 分钟会退出并保留已有报告。可用 `-Route QnnLive` 单独跑混合转录对照，或用 `-Route GgmlHexagon` 单独跑 GGML。
 
-当前固定入口先测试六种 GGML Target/Draft 组合，再比较全 GPU DFlash 和 GPU + QNN HTP 八位置验证。两项均使用同一条 `zh-plain-1.wav`。QNN 回放已通过，完整请求使用现有的 ARM64 QNN Python 环境。两条路线分别报告结果。GGML 的准备步骤受阻时直接记录具体错误并结束该路线。请拍最后的 **VOXT SNAPDRAGON REPORT**，若一屏放不下，请分两张。无需重跑 31 条 CPU 基准。
+当前固定入口测音频编码占比。使用同一条 `zh-plain-1.wav`，以纯 OpenCL Target-only 为对照，分别在 HTP Target-only 和 HTP Target + HTP Q4 草稿上切换 Adreno / HTP 音频编码。五种配置各测三次，报告取请求 TPS 中位数对应的同一次测量，打印编码器毫秒数、占请求耗时的百分比、编码期间 HTP 算子数和端到端 TPS。编码计时覆盖音频编码器与投影，单独排除特征预处理与语言模型 prefill。原始逐次结果在日志目录的 `placement.csv`。请拍最后的 **VOXT SNAPDRAGON REPORT**。
+
+更新本地启动器后，可用 `-Route All` 重新测完整 Target/Draft 组合及 QNN 八位置验证。QNN 当前只接入满八位置的验证，完整 QNN Target-only 尚无实测。
 
 ## GPU + QNN HTP 转录
 
@@ -127,6 +129,6 @@ git switch --detach veri-1-opencl-fix
 
 ## Target 和 Draft 设备组合实测
 
-在 Windows ARM64 仓库根目录运行 `.\scripts\win-arm64\update_and_verify.ps1`（不带参数）。GGML 先在同一份 Hexagon + OpenCL 主机上轮换测试 GPU/HTP 两种 Target-only 和四种 Target/Draft 组合。音频投影始终使用 GPU。每种运行三次，每次重启服务，使用同一条 zh-plain-1 和相同模型。按请求吞吐中位数报告，模型初始化不计入 TPS。脚本检查模型加载的设备名、输出文本和完整 token，含 HTP 的路线还检查请求内 DSP 算子事件。一种组合失败会记录日志并继续其他组合。每轮指标保存在 placement.csv，原始日志保留模型、KV、计算缓冲区分配和每个阶段的请求指标。
+在 Windows ARM64 仓库根目录使用新版启动器运行 `.\scripts\win-arm64\update_and_verify.ps1 -Route All`。GGML 先在同一份 Hexagon + OpenCL 主机上轮换测试 GPU/HTP 两种 Target-only 和四种 Target/Draft 组合。音频投影始终使用 GPU。每种运行三次，每次重启服务，使用同一条 zh-plain-1 和相同模型。按请求吞吐中位数报告，模型初始化不计入 TPS。脚本检查模型加载的设备名、输出文本和完整 token，含 HTP 的路线还检查请求内 DSP 算子事件。一种组合失败会记录日志并继续其他组合。每轮指标保存在 placement.csv，原始日志保留模型、KV、计算缓冲区分配和每个阶段的请求指标。
 
 随后测试 GPU prefill、GPU 草稿和 QNN 满八位置 Target 验证。QNN worker 初始化一次，三次请求各自重启 ASR 服务；通过累计设备事件和逐次完整 token 对照验收。报告记录本机连接收发的张量字节数及准备、等待 worker、读回应用的耗时，等待包含推理。GGML 的跨设备数字仅覆盖可识别的同步 tensor copy，不包含所有驱动搬运或排队。内存为请求期间按 50 ms 间隔采样的进程私有提交量和工作集峰值，混合路线计入同一时刻的 ASR 服务和 QNN worker；工作集之和可能重复计算共享页。设备驱动驻留和初始化峰值不在该指标内。

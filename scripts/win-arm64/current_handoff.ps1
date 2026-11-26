@@ -4,7 +4,7 @@ param(
     [Parameter(Mandatory)][string]$BuildDirectory,
     [Parameter(Mandatory)][string]$LogDirectory,
     [switch]$FullReplay,
-    [ValidateSet('All', 'QnnLive', 'GgmlHexagon')][string]$Route = 'All'
+    [ValidateSet('AudioEncoder', 'All', 'QnnLive', 'GgmlHexagon')][string]$Route = 'AudioEncoder'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -20,10 +20,12 @@ foreach ($step in @(
     @{ Id='GgmlHexagon'; Name='GGML Hexagon'; Script='verify_ggml_hexagon.ps1' },
     @{ Id='QnnLive'; Name='QNN live'; Script='verify_live_qnn.ps1' }
 )) {
-    if ($Route -ne 'All' -and $Route -ne $step.Id) { continue }
+    $audioTest = $Route -eq 'AudioEncoder' -and $step.Id -eq 'GgmlHexagon'
+    if (!$audioTest -and $Route -ne 'All' -and $Route -ne $step.Id) { continue }
     Write-Host "[voxt] Starting $($step.Name)."
     try {
         $extra = @{}
+        if ($audioTest) { $extra.AudioComparison = $true }
         if ($Route -eq 'All') { $extra.PlacementMatrix = $true }
         & (Join-Path $PSScriptRoot $step.Script) @paths @extra -Summary $notes
     } catch {

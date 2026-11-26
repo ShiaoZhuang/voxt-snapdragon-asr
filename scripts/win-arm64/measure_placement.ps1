@@ -1,5 +1,6 @@
 [CmdletBinding()]
 param(
+    [switch]$AudioComparison,
     [Parameter(Mandatory)][string]$InstallDirectory,
     [Parameter(Mandatory)][string]$Product,
     [Parameter(Mandatory)][string]$Ops,
@@ -15,6 +16,15 @@ $cases = @(
     @{ Name='GPU+HTP'; Target='opencl'; Draft='hexagon' },
     @{ Name='HTP+HTP'; Target='hexagon'; Draft='hexagon' }
 )
+if ($AudioComparison) {
+    $cases = @(
+        @{ Name='GPU-only'; Target='opencl'; Audio='opencl' },
+        @{ Name='HTP-target/GPU-audio'; Target='hexagon'; Audio='opencl' },
+        @{ Name='HTP-target/HTP-audio'; Target='hexagon'; Audio='hexagon' },
+        @{ Name='HTP-dflash/GPU-audio'; Target='hexagon'; Draft='hexagon'; Audio='opencl' },
+        @{ Name='HTP-dflash/HTP-audio'; Target='hexagon'; Draft='hexagon'; Audio='hexagon' }
+    )
+}
 $probe = Join-Path $PSScriptRoot 'probe_opencl_startup.ps1'
 $reference = $null
 $failed = @{}
@@ -26,9 +36,10 @@ for ($rep = 0; $rep -lt 3; $rep++) {
         $name = $case.Name
         if ($failed.ContainsKey($name)) { continue }
         Write-Host "[voxt] Placement $name ($($rep+1)/3): fresh server, zh-plain-1."
-        $path = Join-Path $LogDirectory "placement-$name-$rep.txt"
+        $path = Join-Path $LogDirectory "placement-$($name.Replace('/', '-'))-$rep.txt"
         $opts = @{Backend=$case.Target; NativeBuildDirectory=$Product; InstallDirectory=$InstallDirectory;
             HexagonOpsDirectory=$Ops; ReportPath=$path; MetricsPath="$path.metrics.json"; MeasurePlacement=$true; Transcribe=$true}
+        if ($case.Audio) { $opts.AudioBackend = $case.Audio }
         if ($case.Draft) { $opts.Draft=$true; $opts.DraftBackend=$case.Draft }
         try {
             & $probe @opts | Out-Host
@@ -56,9 +67,24 @@ for ($rep = 0; $rep -lt 3; $rep++) {
             $events = 0
             $copyBytes = 0L
             $copyUs = 0L
+            $inAudio = $false
+            $audioUs = 0L
+            $audioEvents = 0
             $inRequest = $false
             foreach ($line in $lines) {
                 if ($line -match 'voxt: GGML Hexagon audio request started') { $inRequest = $true }
+                if ($AudioComparison) {
+                    if ($line -match '^voxt: audio encoder begin$') {
+                        if ($inAudio) { throw 'Audio encoder timing has overlapping batches.' }
+                        $inAudio = $true
+                    } elseif ($line -match '^voxt: audio encoder end us (\d+) status 0$') {
+                        if (!$inAudio) { throw 'Missing audio encoder start.' }
+                        $audioUs += [long]$Matches[1]
+                        $inAudio = $false
+                    } elseif ($inAudio -and $line -match 'ggml-hex: HTP0 profile-op (?!OPBATCH).*\|usec [0-9]+ cycles [1-9][0-9]*') {
+                        $audioEvents++
+                    }
+                }
                 if (!$inRequest) { continue }
                 if ($line -match 'ggml-hex: HTP0 profile-op (?!OPBATCH).*\|usec [0-9]+ cycles [1-9][0-9]*') { $events++ }
                 if ($line -match 'voxt: sync GPU/HTP copy (\d+) bytes (\d+) us') {
@@ -73,6 +99,12 @@ for ($rep = 0; $rep -lt 3; $rep++) {
                 gpu_reference_matched=[bool]$reference; backend_allocations=($buffers -join ' | '); devices=($devices -join ',');
                 sync_copy_bytes=$copyBytes; sync_copy_us=$copyUs; dsp_events=$events; draft_ms=$m.draft_ms;
                 verify_ms=$m.verify_ms; context_ms=$m.context_ms; rounds=$m.rounds; accepted=$m.accepted; proposed=$m.proposed}
+            if ($AudioComparison) {
+                if ($inAudio -or $audioUs -le 0 -or $audioUs -gt $m.wall_ms * 1000) { throw 'Invalid or missing in-request audio encoding time.' }
+                if ($case.Audio -eq 'hexagon' -and !$audioEvents) { throw 'No HTP0 operator executed during audio encoding.' }
+                $row | Add-Member -NotePropertyMembers @{audio_backend=$case.Audio; audio_ms=$audioUs/1000.0;
+                    audio_pct=100.0*$audioUs/(1000.0*$m.wall_ms); audio_htp_events=$audioEvents}
+            }
             $row | Export-Csv -NoTypeInformation -Encoding UTF8 -Append -LiteralPath $csv
             $results += $row
         } catch {
@@ -82,11 +114,17 @@ for ($rep = 0; $rep -lt 3; $rep++) {
     }
 }
 if (!$reference) { $Summary.Add('GPU-only reference unavailable. Other timings are diagnostic; cross-device token equality unverified.') }
-$Summary.Add('Target+Draft | median of 3 request TPS | max sampled process private / working set MiB | observed synchronous GPU/HTP copy (median-TPS trial)')
+if ($AudioComparison) { $Summary.Add('Audio encoder / request | values from the median-TPS trial | encoder time excludes feature preprocessing and Target prefill') }
+else { $Summary.Add('Target+Draft | median of 3 request TPS | max sampled process private / working set MiB | observed synchronous GPU/HTP copy (median-TPS trial)') }
 foreach ($case in $cases) {
     $runs = @($results | Where-Object name -eq $case.Name | Sort-Object tps)
     if ($runs.Count -ne 3) { continue }
     $mid = $runs[1]
+    if ($AudioComparison) {
+        $Summary.Add(('{0} | {1:F2} tok/s | request {2:F0} ms | encoder {3:F1} ms ({4:F1}%) | encoder HTP events {5}' -f
+            $mid.name,$mid.tps,$mid.ms,$mid.audio_ms,$mid.audio_pct,$mid.audio_htp_events))
+        continue
+    }
     $priv = ($runs | Measure-Object private_MiB -Maximum).Maximum
     $ws = ($runs | Measure-Object ws_MiB -Maximum).Maximum
     $Summary.Add(('{0} | {1:F2} tok/s | {2:F0}/{3:F0} MiB | {4:F2} MiB/{5:F2} ms | {6} HTP events' -f

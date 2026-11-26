@@ -11,6 +11,7 @@ param(
     [switch]$Draft,
     [ValidateSet('opencl', 'hexagon')][string]$Backend = 'opencl',
     [ValidateSet('opencl','hexagon')][string]$DraftBackend,
+    [ValidateSet('opencl','hexagon')][string]$AudioBackend,
     [int]$WorkerId,
     [switch]$MeasurePlacement,
     [string]$HexagonOpsDirectory
@@ -140,6 +141,7 @@ function Invoke-ClipProbe([int]$Port, [string]$Audio) {
         $start.Arguments = '--supervised --host 127.0.0.1 --port 0 --backend ' + $Backend + ' --model-directory "' + $models + '"'
         if ($Draft) { $start.Arguments += ' --draft-model-path "' + $models + '" --draft-bits 4' }
         if ($DraftBackend) { $start.Arguments += " --draft-backend $DraftBackend" }
+        if ($AudioBackend) { $start.Arguments += " --audio-backend $AudioBackend" }
         $start.WorkingDirectory = $root
         $start.UseShellExecute = $false
         $start.RedirectStandardInput = $true
@@ -149,7 +151,7 @@ function Invoke-ClipProbe([int]$Port, [string]$Audio) {
         $start.StandardErrorEncoding = [Text.Encoding]::UTF8
         $start.EnvironmentVariables['LLAMA_ARG_LOG_VERBOSITY'] = '5'
         if ($MeasurePlacement) { $start.EnvironmentVariables['VOXT_TRACE_INTERDEVICE_COPY'] = '1' }
-        if ($Backend -eq 'hexagon' -or $DraftBackend -eq 'hexagon') {
+        if ($Backend -eq 'hexagon' -or $DraftBackend -eq 'hexagon' -or $AudioBackend -eq 'hexagon') {
             $start.EnvironmentVariables['GGML_HEXAGON_DEVICES'] = 'HTP0'
             $start.EnvironmentVariables['GGML_HEXAGON_PROFILE'] = '1'
             $ops = $HexagonOpsDirectory
