@@ -110,7 +110,7 @@ try {
         Start-Sleep -Milliseconds 250
     }
     $ready = Get-Content -Raw -LiteralPath (Join-Path $workerDirectory 'ready.json') | ConvertFrom-Json
-    $Summary.Add("QNN verifier ready | history capacity $($ready.history_capacity) tokens")
+    $Summary.Add("QNN verifier ready | history capacity $($ready.history_capacity) tokens | transport $($ready.transport)")
     Write-Host '[voxt] Measuring GPU + HTP DFlash.'
     $trials = if ($PlacementMatrix) { 3 } else { 1 }
     $hybrids = @(for ($trial = 1; $trial -le $trials; $trial++) {

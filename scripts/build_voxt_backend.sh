@@ -16,7 +16,7 @@ if [[ ! -d "$source_dir" ]]; then
     curl --fail --location --retry 3 -o "$stage/source.tar.gz" "https://codeload.github.com/ggml-org/llama.cpp/tar.gz/$revision"
     tar -xzf "$stage/source.tar.gz" --strip-components=1 -C "$stage/source"
   fi
-  patch -d "$stage/source" -p1 < patches/llama-voxt.patch
+  GIT_CEILING_DIRECTORIES="$(cd "$stage" && pwd -P)" git -C "$stage/source" apply --no-index "$PWD/patches/llama-voxt.patch"
   mv "$stage/source" "$source_dir"
 fi
 build_dir="${VOXT_BUILD_DIR:-build/voxt-${patch_sha:0:12}}"

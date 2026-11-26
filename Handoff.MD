@@ -23,7 +23,7 @@ if ($LASTEXITCODE -eq 0) { git restore --source=FETCH_HEAD -- scripts/win-arm64/
 
 脚本先采集一批全 GPU 的八位置验证张量，为短上下文下的 28 层量化图确定形状与激活范围。采集和构建会话在计时前完成。先测混合转录，取得实际 HTP 执行记录后才测一次全 GPU DFlash 对照。两条测速请求均使用相同的模型、音频和 Q4 草稿配置。需要已有实机回放创建的 ARM64 QNN Python 环境。
 
-混合路径用 GPU 执行音频预填充、Target prefill、草稿和不足八位置的批次。满八位置时，现有解码器把实际位置、token 和活动历史 KV 交给 QNN worker。worker 把 28 层按顺序分成四个七层 QNN 会话，逐组初始化并报告进度。每组的隐藏状态传给下一组，报告逐组核对 HTP 执行次数。worker 用 HTP 执行 28 层，主机处理 token embedding 和词表输出层。K/V、三处 Draft 辅助状态和 logits 写回原解码器，原接受、拒绝与回滚逻辑继续负责提交顺序。首次实现逐轮通过本地文件传输张量，全部等待、搬运、主机输出层和 QNN 执行时间计入请求 TPS。会话的固定历史容量按报告显示，超出容量会报对应错误。
+混合路径用 GPU 执行音频预填充、Target prefill、草稿和不足八位置的批次。满八位置时，现有解码器把实际位置、token 和活动历史 KV 交给 QNN worker。worker 把 28 层按顺序分成四个七层 QNN 会话，逐组初始化并报告进度。每组的隐藏状态传给下一组，报告逐组核对 HTP 执行次数。worker 用 HTP 执行 28 层，主机处理 token embedding 和词表输出层。K/V、三处 Draft 辅助状态和 logits 写回原解码器，原接受、拒绝与回滚逻辑继续负责提交顺序。ASR 服务逐轮通过带本次运行随机令牌的本机 TCP 连接传输张量，全部等待、搬运、主机输出层和 QNN 执行时间计入请求 TPS。会话的固定历史容量按报告显示，超出容量会报对应错误。
 
 报告只有在完整 token 序列和转录文本一致、服务与 worker 的满批轮数一致且有 QAIRT 执行记录时给出吞吐倍率。日志目录保存两个请求的计时、转录及 profiler 报告。
 
@@ -129,4 +129,4 @@ git switch --detach veri-1-opencl-fix
 
 在 Windows ARM64 仓库根目录运行 `.\scripts\win-arm64\update_and_verify.ps1`（不带参数）。GGML 先在同一份 Hexagon + OpenCL 主机上轮换测试 GPU/HTP 两种 Target-only 和四种 Target/Draft 组合。音频投影始终使用 GPU。每种运行三次，每次重启服务，使用同一条 zh-plain-1 和相同模型。按请求吞吐中位数报告，模型初始化不计入 TPS。脚本检查模型加载的设备名、输出文本和完整 token，含 HTP 的路线还检查请求内 DSP 算子事件。一种组合失败会记录日志并继续其他组合。每轮指标保存在 placement.csv，原始日志保留模型、KV、计算缓冲区分配和每个阶段的请求指标。
 
-随后测试 GPU prefill、GPU 草稿和 QNN 满八位置 Target 验证。QNN worker 初始化一次，三次请求各自重启 ASR 服务；通过累计设备事件和逐次完整 token 对照验收。报告记录文件交换字节数及准备、等待 worker、读回应用的耗时，等待包含推理。GGML 的跨设备数字仅覆盖可识别的同步 tensor copy，不包含所有驱动搬运或排队。内存为请求期间按 50 ms 间隔采样的进程私有提交量和工作集峰值，混合路线计入同一时刻的 ASR 服务和 QNN worker；工作集之和可能重复计算共享页。设备驱动驻留和初始化峰值不在该指标内。
+随后测试 GPU prefill、GPU 草稿和 QNN 满八位置 Target 验证。QNN worker 初始化一次，三次请求各自重启 ASR 服务；通过累计设备事件和逐次完整 token 对照验收。报告记录本机连接收发的张量字节数及准备、等待 worker、读回应用的耗时，等待包含推理。GGML 的跨设备数字仅覆盖可识别的同步 tensor copy，不包含所有驱动搬运或排队。内存为请求期间按 50 ms 间隔采样的进程私有提交量和工作集峰值，混合路线计入同一时刻的 ASR 服务和 QNN worker；工作集之和可能重复计算共享页。设备驱动驻留和初始化峰值不在该指标内。

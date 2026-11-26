@@ -164,7 +164,15 @@ function Invoke-ClipProbe([int]$Port, [string]$Audio) {
             $start.EnvironmentVariables['VOXT_ASR_TRACE'] = '1'
             $start.EnvironmentVariables['OMNI_DFLASH_PROFILE'] = '1'
         }
+        foreach ($key in @('VOXT_QNN_VERIFY_DIR','VOXT_QNN_VERIFY_PORT','VOXT_QNN_VERIFY_TOKEN')) {
+            $start.EnvironmentVariables.Remove($key)
+        }
         if ($LiveVerifyDirectory) {
+            $worker = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $LiveVerifyDirectory 'ready.json') | ConvertFrom-Json
+            if ($worker.transport -ne 'loopback-v1' -or $worker.token -cnotmatch '^[a-f0-9]{32}$' -or
+                [int]$worker.port -lt 1 -or [int]$worker.port -gt 65535) { throw 'Invalid QNN worker connection details.' }
+            $start.EnvironmentVariables['VOXT_QNN_VERIFY_PORT'] = [string]$worker.port
+            $start.EnvironmentVariables['VOXT_QNN_VERIFY_TOKEN'] = $worker.token
             $start.EnvironmentVariables['VOXT_QNN_VERIFY_DIR'] = $LiveVerifyDirectory
             $start.EnvironmentVariables['LLAMA_DFLASH_DEV'] = '0'
         }

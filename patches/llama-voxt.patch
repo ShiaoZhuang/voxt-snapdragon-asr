@@ -425,13 +425,16 @@ diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
 diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
 --- a/src/CMakeLists.txt
 +++ b/src/CMakeLists.txt
-@@ -67,6 +67,10 @@
+@@ -67,6 +67,13 @@
 
  target_include_directories(llama PRIVATE . ${CMAKE_CURRENT_BINARY_DIR})
  target_include_directories(llama PUBLIC ../include)
 +if (LLAMA_VOXT_SOURCE)
 +    target_include_directories(llama PRIVATE "${LLAMA_VOXT_SOURCE}")
 +    target_compile_definitions(llama PRIVATE LLAMA_VOXT_LIVE_VERIFY)
++    if (WIN32)
++        target_link_libraries(llama PRIVATE ws2_32)
++    endif()
 +endif()
  target_compile_features   (llama PRIVATE cxx_std_17) # don't bump
 

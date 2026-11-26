@@ -27,9 +27,12 @@ foreach ($step in @(
         if ($Route -eq 'All') { $extra.PlacementMatrix = $true }
         & (Join-Path $PSScriptRoot $step.Script) @paths @extra -Summary $notes
     } catch {
+        $failureLog = Join-Path $LogDirectory "$($step.Id)-failure.txt"
+        $location = "$([IO.Path]::GetFileName($_.InvocationInfo.ScriptName)):$($_.InvocationInfo.ScriptLineNumber)"
+        @($_.Exception.ToString(), $_.ScriptStackTrace) | Set-Content -Encoding UTF8 -LiteralPath $failureLog
         $failures += $step.Name
-        $notes.Add("$($step.Name): INCOMPLETE | $($_.Exception.Message)")
-        Write-Host "[voxt] $($step.Name): INCOMPLETE | $($_.Exception.Message)"
+        $notes.Add("$($step.Name): INCOMPLETE | $($_.Exception.Message) | $location")
+        Write-Host "[voxt] $($step.Name): INCOMPLETE | $($_.Exception.Message) | $location"
     } finally {
         $notes | Set-Content -Encoding UTF8 -LiteralPath (Join-Path $LogDirectory 'workflow_summary.txt')
     }

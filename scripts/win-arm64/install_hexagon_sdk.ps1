@@ -25,7 +25,7 @@ function Test-HexagonSdk([string]$Path) {
 }
 
 if (Test-HexagonSdk $sdk) {
-    Write-Host "Using cached Hexagon SDK $($Release.version)."
+    Write-Host "[voxt] Using cached Hexagon SDK $($Release.version)."
     return $sdk
 }
 
@@ -92,7 +92,7 @@ try {
         Write-Host "Moved the incomplete SDK cache to $backup."
     }
     [IO.Directory]::Move($source, $sdk)
-    Write-Host "Installed Hexagon SDK in $sdk."
+    Write-Host "[voxt] Installed Hexagon SDK in $sdk."
     return $sdk
 } finally {
     Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue

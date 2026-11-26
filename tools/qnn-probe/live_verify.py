@@ -4,6 +4,9 @@ import argparse
 from copy import deepcopy
 import json
 from pathlib import Path
+import secrets
+import socket
+import struct
 import time
 
 import gguf
@@ -60,19 +63,7 @@ def calibrate(target, aux, capture, model_path, layers, *, cpu_test=False):
     return int(cache_shape[2])
 
 
-def exchange_io(operation, action):
-    deadline = time.monotonic() + 2
-    while True:
-        try:
-            return action()
-        except PermissionError as error:
-            if time.monotonic() >= deadline:
-                raise RuntimeError(f"{operation}: {error}") from error
-            time.sleep(0.025)
-
-
-def read_request(path, history_capacity, embedding, rope):
-    packet = exchange_io("read published request", path.read_bytes)
+def decode_request(packet, history_capacity, embedding, rope):
     n = int(np.frombuffer(packet, "<i4", 1)[0])
     if not 0 <= n <= history_capacity:
         raise ValueError(f"history length {n} exceeds capacity {history_capacity}")
@@ -100,6 +91,27 @@ def read_request(path, history_capacity, embedding, rope):
             offset += n * 1024 * 2
             feeds[f"L{layer}_past_{kind}"] = kv
     return feeds
+
+
+def verify_round(feeds, sessions, aux, norm, epsilon, weights, round_number):
+    names = [f"L{i}_{kind}" for i in range(LAYERS) for kind in ("K", "V")] + [
+        f"hidden_{i}" for i in aux + [LAYERS]]
+    start = time.perf_counter()
+    outputs = {}
+    for session, run_options, end_layer in sessions:
+        group_feeds = {item.name: feeds[item.name] for item in session.get_inputs()}
+        group_names = [item.name for item in session.get_outputs()]
+        outputs.update(zip(group_names, session.run(group_names, group_feeds, run_options)))
+        feeds["residual"] = outputs[f"hidden_{end_layer}"]
+    values = [outputs[name] for name in names]
+    print(f"Round {round_number} graph: {(time.perf_counter() - start) * 1000:.2f} ms", flush=True)
+    logits = normalize(values[-1].astype(np.float32), norm, epsilon) @ weights.T
+    if any(not np.isfinite(x).all() for x in [*values, logits]):
+        raise ValueError("nonfinite live verifier output")
+    chunks = [kv.swapaxes(1, 2).astype("<f2", copy=False).tobytes() for kv in values[:LAYERS * 2]]
+    chunks.extend(hidden.astype("<f4").tobytes() for hidden in values[LAYERS * 2:-1])
+    chunks.append(logits.astype("<f4", copy=False).tobytes())
+    return chunks
 
 
 def serve(args):
@@ -138,40 +150,55 @@ def serve(args):
                 raise RuntimeError("QNN HTP provider missing from the verification session")
         sessions.append((session, run_options, layers.stop))
         print(f"Ready layers {start_layer + 1}-{layers.stop}/{LAYERS}", flush=True)
-    write_json(folder / "ready.json", {"history_capacity": capacity, "groups": len(sessions)})
     count = 0
+    token = secrets.token_hex(16)
     try:
-        while not (folder / "stop").exists():
-            request = folder / "request.bin"
-            try:
-                feeds = read_request(request, capacity, embedding, rope)
-            except FileNotFoundError:
-                time.sleep(0.002)
-                continue
-            exchange_io("remove consumed request", request.unlink)
-            names = [f"L{i}_{kind}" for i in range(LAYERS) for kind in ("K", "V")] + [
-                f"hidden_{i}" for i in aux + [LAYERS]]
-            start = time.perf_counter()
-            outputs = {}
-            for session, run_options, end_layer in sessions:
-                group_feeds = {item.name: feeds[item.name] for item in session.get_inputs()}
-                group_names = [item.name for item in session.get_outputs()]
-                outputs.update(zip(group_names, session.run(group_names, group_feeds, run_options)))
-                feeds["residual"] = outputs[f"hidden_{end_layer}"]
-            values = [outputs[name] for name in names]
-            print(f"Round {count + 1} graph: {(time.perf_counter() - start) * 1000:.2f} ms", flush=True)
-            logits = normalize(values[-1].astype(np.float32), norm, epsilon) @ weights.T
-            if any(not np.isfinite(x).all() for x in [*values, logits]):
-                raise ValueError("nonfinite live verifier output")
-            stage = folder / "response.tmp"
-            with stage.open("wb") as response:
-                for kv in values[:LAYERS * 2]:
-                    response.write(kv.swapaxes(1, 2).astype("<f2", copy=False).tobytes())
-                for hidden in values[LAYERS * 2:-1]:
-                    response.write(hidden.astype("<f4").tobytes())
-                response.write(logits.astype("<f4", copy=False).tobytes())
-            exchange_io("publish verifier response", lambda: stage.replace(folder / "response.bin"))
-            count += 1
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+            listener.bind(("127.0.0.1", 0))
+            listener.listen(2)
+            listener.settimeout(0.25)
+            write_json(folder / "ready.json", {
+                "history_capacity": capacity, "groups": len(sessions), "transport": "loopback-v1",
+                "port": listener.getsockname()[1], "token": token,
+            })
+            while not (folder / "stop").exists():
+                try:
+                    client, _ = listener.accept()
+                except socket.timeout:
+                    continue
+                with client, client.makefile("rb") as stream:
+                    client.settimeout(2)
+                    try:
+                        authenticated = secrets.compare_digest(stream.read(32), token.encode("ascii"))
+                    except OSError:
+                        continue
+                    if not authenticated:
+                        continue
+                    client.settimeout(30)
+                    stage = "receive request"
+                    try:
+                        length, = struct.unpack("!I", stream.read(4))
+                        header = 4 * (1 + 5 * ROWS)
+                        if not header <= length <= header + LAYERS * 2 * capacity * 1024 * 2:
+                            raise ValueError(f"invalid frame length {length}")
+                        packet = stream.read(length)
+                        if len(packet) != length:
+                            raise ValueError(f"truncated frame: expected {length}, received {len(packet)}")
+                        feeds = decode_request(packet, capacity, embedding, rope)
+                        del packet
+                        stage = "execute verifier"
+                        chunks = verify_round(feeds, sessions, aux, norm, epsilon, weights, count + 1)
+                        del feeds
+                        stage = "send reply"
+                        client.sendall(struct.pack("!I", sum(map(len, chunks))))
+                        for chunk in chunks:
+                            client.sendall(chunk)
+                        del chunk, chunks
+                        count += 1
+                    except Exception as error:
+                        message = f"round {count + 1}, {stage}: {error}"
+                        write_json(folder / "error.json", {"error": message})
+                        raise RuntimeError(message) from error
     finally:
         events = [0 if args.cpu_test else htp_execute_events(session.end_profiling())
                   for session, _, _ in sessions]

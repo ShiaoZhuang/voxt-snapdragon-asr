@@ -38,7 +38,7 @@ function Invoke-PinnedPackageCurl([string]$Curl, [string]$Url, [string]$Destinat
     $remaining = [int][Math]::Floor($Seconds - $timer.Elapsed.TotalSeconds)
     if (!$lookupFailed -or $remaining -lt 1) { return $result }
 
-    Write-Host '[voxt] Schannel could not check certificate revocation. Retrying once with --ssl-revoke-best-effort.'
+    Write-Host '[voxt] Download in progress (attempt 2 of 2; Schannel revocation lookup unavailable).'
     $retry = Invoke-BoundedWindowsTool $Curl ($options + @('--ssl-revoke-best-effort', '--max-time', "$remaining", $Url)) $remaining
     $retry.RevocationLookupFailed = $true
     if ($retry.Code -ne 0) { $retry.Detail = "$($result.Detail) | Retry: $($retry.Detail)" }

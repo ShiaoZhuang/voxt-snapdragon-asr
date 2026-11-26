@@ -96,7 +96,7 @@ function Get-PinnedSource([string]$Name, [string]$Repo, [string]$Revision, [stri
     $exists = Test-Path -LiteralPath $path
     $needsPatch = $exists -and $Patch -and !(Test-AppliedPatch $path $Patch)
     if (!$exists -or $needsPatch) {
-        $stage = "$path-$([guid]::NewGuid())"
+        $stage = Join-Path (Split-Path -Parent $path) ('.s-' + [guid]::NewGuid().ToString('N').Substring(0,12))
         $backup = $null
         try {
             if ($needsPatch) {
@@ -104,6 +104,12 @@ function Get-PinnedSource([string]$Name, [string]$Repo, [string]$Revision, [stri
             }
             Invoke-BuildTool git @('-c', 'core.longpaths=true', 'init', '-q', $stage) | Out-Host
             Invoke-BuildTool git @('-C', $stage, 'fetch', '--depth=1', '--no-tags', $Repo, $Revision) | Out-Host
+            if ($Name -like 'llama-*') {
+                # The native server builds with LLAMA_BUILD_UI=OFF. Avoid checking out
+                # deeply nested Svelte sources, retaining the server's UI CMake target.
+                @('/*', '!/ui/apps/chat/src/') | & git -C $stage sparse-checkout set --no-cone --stdin
+                if ($LASTEXITCODE -ne 0) { throw "Could not configure the native source checkout at $stage." }
+            }
             Invoke-BuildTool git @('-C', $stage, '-c', 'core.autocrlf=false', '-c', 'core.longpaths=true', 'checkout', '--detach', 'FETCH_HEAD') | Out-Host
             if ((Invoke-BuildTool git @('-C', $stage, 'rev-parse', 'HEAD')) -ne $Revision) { throw "Unexpected revision for $Name" }
             if ($Patch) {
@@ -122,7 +128,10 @@ function Get-PinnedSource([string]$Name, [string]$Repo, [string]$Revision, [stri
             }
             throw
         } finally {
-            if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
+            if (Test-Path -LiteralPath $stage) {
+                try { Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction Stop }
+                catch { Write-Warning "Staging cleanup at $stage failed: $($_.Exception.Message)" }
+            }
         }
     }
     if ((Invoke-BuildTool git @('-C', $path, 'rev-parse', 'HEAD')) -ne $Revision) { throw "Unexpected revision for $Name at $path" }
