@@ -2,6 +2,7 @@
 param(
     [switch]$PlacementMatrix,
     [switch]$HtpSuite,
+    [ValidateSet('Hetero')][string]$Study,
     [switch]$AudioComparison,
     [Parameter(Mandatory)][string]$InstallDirectory,
     [Parameter(Mandatory)][string]$BuildDirectory,
@@ -9,7 +10,8 @@ param(
     [Parameter(Mandatory)][AllowEmptyCollection()][System.Collections.Generic.List[string]]$Summary
 )
 $ErrorActionPreference = 'Stop'
-if ($HtpSuite) { $Summary.Add('All-HTP short and long ASR | Target-only and Q4 DFlash') }
+if ($Study) { $Summary.Add("Snapdragon experiment: $Study") }
+elseif ($HtpSuite) { $Summary.Add('All-HTP short and long ASR | Target-only and Q4 DFlash') }
 elseif ($AudioComparison) { $Summary.Add('Audio encoder placement | zh-plain-1 | same GGML build | 3 requests per configuration') }
 elseif ($PlacementMatrix) { $Summary.Add('GGML placement | zh-plain-1 | audio on Adreno | GPU and HTP0 Target/Draft') }
 else { $Summary.Add('GGML Hexagon | zh-plain-1 | target on HTP0, audio and optional Q4 draft on Adreno') }
@@ -123,14 +125,20 @@ foreach ($run in $previousRuns) {
     }
 }
 
-if ($HtpSuite) {
-    $resultPath = Join-Path $LogDirectory 'htp-suite-summary.txt'
-    & python -u (Join-Path $PSScriptRoot 'measure_htp_suite.py') --server (Join-Path $product 'bin/qwen3_asr_server.exe') --assets $InstallDirectory --ops $ops --logs $LogDirectory | Out-Host
+if ($Study -or $HtpSuite) {
+    $runs = @{
+        Hetero = @('measure_hetero_suite.py', 'hetero-suite-summary.txt')
+        HtpSuite = @('measure_htp_suite.py', 'htp-suite-summary.txt')
+    }
+    $name = if ($HtpSuite) { 'HtpSuite' } else { $Study }
+    $runner, $summaryFile = $runs[$name]
+    $resultPath = Join-Path $LogDirectory $summaryFile
+    & python -u (Join-Path $PSScriptRoot $runner) --server (Join-Path $product 'bin/qwen3_asr_server.exe') --assets $InstallDirectory --ops $ops --logs $LogDirectory | Out-Host
     $status = $LASTEXITCODE
     if (Test-Path -LiteralPath $resultPath) {
         foreach ($line in (Get-Content -Encoding UTF8 -LiteralPath $resultPath)) { $Summary.Add($line) }
     }
-    if ($status -ne 0) { throw "HTP suite failed (exit $status); see $LogDirectory." }
+    if ($status -ne 0) { throw "$name failed (exit $status); see $LogDirectory." }
     return
 }
 

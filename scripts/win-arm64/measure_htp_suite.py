@@ -63,17 +63,20 @@ def errors(reference, text):
 
 
 @contextmanager
-def server(args, draft, profile, ubatch, log):
-    command = [str(args.server), "--supervised", "--backend", "hexagon", "--audio-backend", "hexagon",
+def server(args, draft, profile, ubatch, log, *, target_backend="hexagon", draft_backend="hexagon",
+           extra_env=None, with_pid=False):
+    command = [str(args.server), "--supervised", "--backend", target_backend, "--audio-backend", "hexagon",
                "--model-directory", str(args.assets / "models")]
     if draft:
-        command += ["--draft-model-path", str(args.assets / "models"), "--draft-bits", "4", "--draft-backend", "hexagon"]
+        command += ["--draft-model-path", str(args.assets / "models"), "--draft-bits", "4", "--draft-backend", draft_backend]
     env = dict(os.environ, VOXT_ASR_TRACE="1", OMNI_DFLASH_PROFILE="1", GGML_HEXAGON_DEVICES="HTP0",
                GGML_HEXAGON_LIBHTP_DIR=str(args.ops), GGML_HEXAGON_PROFILE=str(int(profile)),
                LLAMA_ARG_LOG_VERBOSITY="5", LLAMA_ARG_UBATCH=str(ubatch), LLAMA_ARG_BATCH="2048")
     for key in ("VOXT_QNN_VERIFY_DIR", "VOXT_QNN_VERIFY_PORT", "VOXT_QNN_VERIFY_TOKEN",
                 "VOXT_VERIFY_CAPTURE_DIR", "VOXT_VERIFY_CAPTURE_ALL_LAYERS"):
         env.pop(key, None)
+    if extra_env:
+        env.update(extra_env)
     started = time.perf_counter()
     with log.open("wb") as stderr, subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                                      stderr=stderr, env=env) as child:
@@ -86,7 +89,8 @@ def server(args, draft, profile, ubatch, log):
                 raise TimeoutError(f"120 s waiting for ready; see {log.name}") from exc
             if msg.get("event") != "ready" or msg.get("host") != "127.0.0.1":
                 raise RuntimeError(f"invalid ready response; see {log.name}")
-            yield msg["port"], (time.perf_counter() - started) * 1000
+            result = (msg["port"], (time.perf_counter() - started) * 1000)
+            yield (*result, child.pid) if with_pid else result
         finally:
             child.stdin.close()
             try:

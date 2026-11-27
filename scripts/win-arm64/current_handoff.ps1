@@ -4,7 +4,7 @@ param(
     [Parameter(Mandatory)][string]$BuildDirectory,
     [Parameter(Mandatory)][string]$LogDirectory,
     [switch]$FullReplay,
-    [ValidateSet('HtpSuite', 'AudioEncoder', 'All', 'QnnLive', 'GgmlHexagon')][string]$Route = 'HtpSuite'
+    [ValidateSet('Hetero', 'HtpSuite', 'AudioEncoder', 'All', 'QnnLive', 'GgmlHexagon')][string]$Route = 'Hetero'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -14,17 +14,21 @@ if ($FullReplay) {
     & (Join-Path $PSScriptRoot 'qnn_handoff.ps1') @paths -FullReplay
     return
 }
+if (!$PSBoundParameters.ContainsKey('Route') -and $env:VOXT_VERIFY_ROUTE) {
+    $Route = $env:VOXT_VERIFY_ROUTE
+}
 $notes = [System.Collections.Generic.List[string]]::new()
 $failures = @()
 foreach ($step in @(
     @{ Id='GgmlHexagon'; Name='GGML Hexagon'; Script='verify_ggml_hexagon.ps1' },
     @{ Id='QnnLive'; Name='QNN live'; Script='verify_live_qnn.ps1' }
 )) {
-    $audioTest = $Route -in 'HtpSuite','AudioEncoder' -and $step.Id -eq 'GgmlHexagon'
+    $audioTest = $Route -in 'Hetero','HtpSuite','AudioEncoder' -and $step.Id -eq 'GgmlHexagon'
     if (!$audioTest -and $Route -ne 'All' -and $Route -ne $step.Id) { continue }
     Write-Host "[voxt] Starting $($step.Name)."
     try {
         $extra = @{}
+        if ($audioTest -and $Route -eq 'Hetero') { $extra.Study = $Route }
         if ($audioTest -and $Route -eq 'HtpSuite') { $extra.HtpSuite = $true }
         if ($audioTest -and $Route -eq 'AudioEncoder') { $extra.AudioComparison = $true }
         if ($Route -eq 'All') { $extra.PlacementMatrix = $true }
