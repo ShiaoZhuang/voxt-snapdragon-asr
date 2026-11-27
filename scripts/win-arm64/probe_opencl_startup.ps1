@@ -153,7 +153,6 @@ function Invoke-ClipProbe([int]$Port, [string]$Audio) {
         $start.RedirectStandardError = $true
         $start.StandardOutputEncoding = [Text.Encoding]::UTF8
         $start.StandardErrorEncoding = [Text.Encoding]::UTF8
-        $start.EnvironmentVariables['LLAMA_ARG_LOG_VERBOSITY'] = '5'
         if ($MeasurePlacement) { $start.EnvironmentVariables['VOXT_TRACE_INTERDEVICE_COPY'] = '1' }
         if ($Backend -eq 'hexagon' -or $DraftBackend -eq 'hexagon' -or $AudioBackend -eq 'hexagon') {
             $start.EnvironmentVariables['GGML_HEXAGON_DEVICES'] = 'HTP0'
@@ -192,6 +191,9 @@ function Invoke-ClipProbe([int]$Port, [string]$Audio) {
                 $start.EnvironmentVariables[$key] = $UserBackendProfile.Environment[$key]
             }
         }
+        # llama.cpp emits the model and audio device assignments at trace verbosity.
+        # Keep this diagnostic override local to the probe, after the desktop profile.
+        $start.EnvironmentVariables['LLAMA_ARG_LOG_VERBOSITY'] = '5'
         $child = [Diagnostics.Process]::Start($start)
         "Started PID: $($child.Id)"
         $stderr = $child.StandardError.ReadToEndAsync()

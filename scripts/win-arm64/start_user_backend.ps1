@@ -112,6 +112,9 @@ $devices = @(foreach ($line in $lines) {
 $audioDevices = @(foreach ($line in $lines) {
     if ($line -match 'mtmd_backends:\s+using (\S+) backend') { $Matches[1] }
 })
+if (!$devices.Count -or !$audioDevices.Count) {
+    throw "Missing loader evidence after successful transcription (model device records: $($devices.Count)/2, audio: $($audioDevices.Count)/1). See $report"
+}
 if (($devices -join ',') -cne 'HTP0,HTP0' -or ($audioDevices -join ',') -cne 'HTP0') {
     throw "Unexpected Target/Draft or audio placement. Models: $devices. Audio: $audioDevices. See $report"
 }
