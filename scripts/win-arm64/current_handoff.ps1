@@ -4,7 +4,7 @@ param(
     [Parameter(Mandatory)][string]$BuildDirectory,
     [Parameter(Mandatory)][string]$LogDirectory,
     [switch]$FullReplay,
-    [ValidateSet('Explore', 'Hetero', 'Queue', 'QnnReply', 'ConvLayout', 'LongPair', 'Fusion', 'Dispatch', 'Wait', 'QnnHtpAudio', 'HtpSuite', 'AudioEncoder', 'All', 'QnnLive', 'GgmlHexagon')][string]$Route = 'Explore'
+    [ValidateSet('DesktopPilot', 'Explore', 'Hetero', 'Queue', 'QnnReply', 'ConvLayout', 'LongPair', 'Fusion', 'Dispatch', 'Wait', 'QnnHtpAudio', 'HtpSuite', 'AudioEncoder', 'All', 'QnnLive', 'GgmlHexagon')][string]$Route = 'DesktopPilot'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -16,6 +16,10 @@ if ($FullReplay) {
 }
 if (!$PSBoundParameters.ContainsKey('Route') -and $env:VOXT_VERIFY_ROUTE) {
     $Route = $env:VOXT_VERIFY_ROUTE
+}
+if ($Route -eq 'DesktopPilot') {
+    & (Join-Path $PSScriptRoot 'install_voxt_user_test.ps1') @paths
+    return
 }
 $notes = [System.Collections.Generic.List[string]]::new()
 $failures = @()

@@ -15,7 +15,8 @@ param(
     [int]$WorkerId,
     [switch]$MeasurePlacement,
     [string]$HexagonOpsDirectory,
-    [switch]$HostDraftFeatures
+    [switch]$HostDraftFeatures,
+    $UserBackendProfile
 )
 
 $ErrorActionPreference = 'Stop'
@@ -75,7 +76,7 @@ function Invoke-ClipProbe([int]$Port, [string]$Audio) {
             $events = @($body -split '\r?\n' | Where-Object { $_ -match '^data: ' } | ForEach-Object { $_.Substring(6) })
             $done = $events | Where-Object { $_ -ne '[DONE]' } | ForEach-Object { $_ | ConvertFrom-Json } |
                 Where-Object type -eq 'transcript.text.done' | Select-Object -Last 1
-            if (!$response.IsSuccessStatusCode -or !($events -contains '[DONE]') -or !$done.text -or !$done.generation_metadata) {
+            if (!$response.IsSuccessStatusCode -or !$events.Count -or $events[-1] -cne '[DONE]' -or !$done.text -or !$done.generation_metadata) {
                 throw 'Expected a nonempty transcript and a complete SSE response with generation metadata.'
             }
             $meta = $done.generation_metadata
@@ -131,6 +132,7 @@ function Invoke-ClipProbe([int]$Port, [string]$Audio) {
             }
             $server = Join-Path $nativeRoot "bin/$serverName"
         }
+        if ($UserBackendProfile) { $server = $UserBackendProfile.Server }
         $models = Join-Path $root 'models'
         foreach ($path in @($server, (Join-Path $models 'target.gguf'), (Join-Path $models 'mmproj.gguf'))) {
             if (!(Test-Path -LiteralPath $path -PathType Leaf)) { throw "Missing $path" }
@@ -183,6 +185,13 @@ function Invoke-ClipProbe([int]$Port, [string]$Audio) {
         if ($LiveVerifyDirectory -or $HostDraftFeatures) { $start.EnvironmentVariables['LLAMA_DFLASH_DEV'] = '0' }
         if ($CaptureDirectory) { $start.EnvironmentVariables['VOXT_VERIFY_CAPTURE_DIR'] = $CaptureDirectory }
         if ($CaptureAllLayers) { $start.EnvironmentVariables['VOXT_VERIFY_CAPTURE_ALL_LAYERS'] = '1' }
+        if ($UserBackendProfile) {
+            $start.Arguments = ($UserBackendProfile.Arguments | ForEach-Object { '"' + $_ + '"' }) -join ' '
+            foreach ($key in $UserBackendProfile.RemoveEnvironment) { $start.EnvironmentVariables.Remove($key) }
+            foreach ($key in $UserBackendProfile.Environment.Keys) {
+                $start.EnvironmentVariables[$key] = $UserBackendProfile.Environment[$key]
+            }
+        }
         $child = [Diagnostics.Process]::Start($start)
         "Started PID: $($child.Id)"
         $stderr = $child.StandardError.ReadToEndAsync()
@@ -196,6 +205,9 @@ function Invoke-ClipProbe([int]$Port, [string]$Audio) {
                     $port = [int]$ready.port
                     if ($ready.event -ne 'ready' -or $ready.host -ne '127.0.0.1' -or $port -lt 1 -or $port -gt 65535) {
                         throw 'Invalid supervised ready event.'
+                    }
+                    if ($UserBackendProfile -and ($ready.server_pid -ne $child.Id -or $ready.model_name -cne 'Qwen3-ASR-1.7B')) {
+                        throw 'Supervised ready event identified a different process or model.'
                     }
                     Invoke-ClipProbe $port $audio
                 } catch { "Transcription probe: FAIL. $_" }

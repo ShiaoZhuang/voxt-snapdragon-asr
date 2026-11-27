@@ -1,0 +1,539 @@
+diff --git a/Voxt/internal/childprocess/background_other.go b/Voxt/internal/childprocess/background_other.go
+new file mode 100644
+index 0000000..4240a97
+--- /dev/null
++++ b/Voxt/internal/childprocess/background_other.go
+@@ -0,0 +1,7 @@
++//go:build !windows
++
++package childprocess
++
++import "os/exec"
++
++func Background(cmd *exec.Cmd) {}
+diff --git a/Voxt/internal/childprocess/background_windows.go b/Voxt/internal/childprocess/background_windows.go
+new file mode 100644
+index 0000000..653a8e6
+--- /dev/null
++++ b/Voxt/internal/childprocess/background_windows.go
+@@ -0,0 +1,13 @@
++package childprocess
++
++import (
++	"os/exec"
++	"syscall"
++)
++
++// A supervised console executable writes to pipes and must not open a console
++// on top of the text field the user is dictating into.
++func Background(cmd *exec.Cmd) {
++	const createNoWindow = 0x08000000
++	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: createNoWindow}
++}
+diff --git a/Voxt/internal/helper/supervise_proc.go b/Voxt/internal/helper/supervise_proc.go
+index ee5cd17..107f5df 100644
+--- a/Voxt/internal/helper/supervise_proc.go
++++ b/Voxt/internal/helper/supervise_proc.go
+@@ -13,6 +13,7 @@ import (
+ 	"strings"
+ 	"time"
+ 
++	"github.com/sgl-project/sglang-omni/Voxt/internal/childprocess"
+ 	"github.com/sgl-project/sglang-omni/Voxt/internal/core"
+ 	"github.com/sgl-project/sglang-omni/Voxt/internal/helper/proto"
+ )
+@@ -92,6 +93,7 @@ func (s *supervisor) failLocked(reason FailReason, msg, tail string) {
+ func (s *supervisor) startProcess() (*proc, error) {
+ 	cmd := exec.Command(s.cfg.Bin)
+ 	cmd.Dir = filepath.Dir(s.cfg.Bin)
++	childprocess.Background(cmd)
+ 	cmd.Env = append(os.Environ(), s.cfg.Env...)
+ 	stdin, err := cmd.StdinPipe()
+ 	if err != nil {
+diff --git a/Voxt/internal/local/library.go b/Voxt/internal/local/library.go
+index 88e9c1e..d05b1eb 100644
+--- a/Voxt/internal/local/library.go
++++ b/Voxt/internal/local/library.go
+@@ -63,7 +63,7 @@ func (l *Library) Installed(kind Kind) []Model {
+ 	var out []Model
+ 	for m := range models.All() {
+ 		if string(m.Kind) == string(kind) && !m.Retired && l.models.Installed(m.ID) {
+-			out = append(out, Model{Kind: kind, ID: m.ID, Name: l.name(m.ID), Features: m.Features, Stream: kind == ASR && m.Runtime == models.Omni})
++			out = append(out, Model{Kind: kind, ID: m.ID, Name: l.name(m.ID), Features: m.Features, Stream: kind == ASR && m.Runtime == models.Omni && !l.models.Packaged(m.ID)})
+ 		}
+ 	}
+ 	return out
+diff --git a/Voxt/internal/models/claims.go b/Voxt/internal/models/claims.go
+index bcab5b1..de2d8ee 100644
+--- a/Voxt/internal/models/claims.go
++++ b/Voxt/internal/models/claims.go
+@@ -9,10 +9,8 @@ import (
+ 	"context"
+ 	"errors"
+ 	"fmt"
+-	"os"
+ 	"slices"
+ 	"strings"
+-	"syscall"
+ 
+ 	"github.com/hehehai/actnowkit/family"
+ 	fammodels "github.com/hehehai/actnowkit/models"
+@@ -23,6 +21,9 @@ import (
+ // apps…"), what it frees. It reads the family's files: off the main
+ // thread.
+ func (m *Manager) Decide(id string) (fammodels.Decision, error) {
++	if m.Packaged(id) {
++		return fammodels.Decision{}, fmt.Errorf("%s is managed by the Snapdragon package", id)
++	}
+ 	mod, ok := m.Lookup(id)
+ 	if !ok {
+ 		return fammodels.Decision{}, fmt.Errorf("%w: %q", ErrUnknown, id)
+@@ -38,6 +39,9 @@ func (m *Manager) Decide(id string) (fammodels.Decision, error) {
+ // with a *fammodels.BusyError. It blocks on the disk: off the main
+ // thread.
+ func (m *Manager) Delete(ctx context.Context, id string, scope fammodels.Scope) ([]fammodels.Result, error) {
++	if m.Packaged(id) {
++		return nil, fmt.Errorf("%s is managed by the Snapdragon package", id)
++	}
+ 	mod, ok := m.Lookup(id)
+ 	if !ok {
+ 		return nil, fmt.Errorf("%w: %q", ErrUnknown, id)
+@@ -209,22 +213,6 @@ func (m *Manager) others(hub string, srcs []string, keep func(root string) bool)
+ 	return srcs, want
+ }
+ 
+-// SameVolume reports whether a and b are folders on one volume, where
+-// a model is hard-linked instead of copied.
+-func SameVolume(a, b string) bool {
+-	sa, err := os.Stat(a)
+-	if err != nil {
+-		return false
+-	}
+-	sb, err := os.Stat(b)
+-	if err != nil {
+-		return false
+-	}
+-	da, ok := sa.Sys().(*syscall.Stat_t)
+-	db, ok2 := sb.Sys().(*syscall.Stat_t)
+-	return ok && ok2 && da.Dev == db.Dev
+-}
+-
+ // notBrought names the models of want that one of srcs has and hub does
+ // not.
+ func notBrought(srcs []string, hub string, want []fammodels.Claim) error {
+@@ -282,7 +270,7 @@ func (m *Manager) claim(ctx context.Context, origin string, ids []string) error
+ // not claim it yet (a session is about to open it): cheap when it does.
+ func (m *Manager) EnsureClaimed(ctx context.Context, id string) error {
+ 	s := m.Status(id)
+-	if !s.OnDisk || s.Mine {
++	if !s.OnDisk || s.Mine || m.Packaged(id) {
+ 		return nil
+ 	}
+ 	return m.Use(ctx, id)
+diff --git a/Voxt/internal/models/manager.go b/Voxt/internal/models/manager.go
+index ee6c66d..ef3acbe 100644
+--- a/Voxt/internal/models/manager.go
++++ b/Voxt/internal/models/manager.go
+@@ -81,9 +81,10 @@ type Status struct {
+ // Manager keeps the catalogue's models in the family's library.
+ // Goroutine-safe.
+ type Manager struct {
+-	store   *fammodels.Store
+-	opt     Options
+-	catalog []Model
++	store    *fammodels.Store
++	opt      Options
++	catalog  []Model
++	packaged map[string]string // read-only model directories supplied by the launcher
+ 
+ 	refreshMu sync.Mutex // one Refresh at a time: a slow one never writes over a later one
+ 	mu        sync.Mutex
+@@ -111,7 +112,7 @@ func Open(opt Options) *Manager {
+ 	if opt.Store == nil {
+ 		panic("models: Open without a Store")
+ 	}
+-	m := &Manager{store: opt.Store, opt: opt, catalog: opt.Catalog,
++	m := &Manager{store: opt.Store, opt: opt, catalog: opt.Catalog, packaged: snapdragonModels(),
+ 		status: map[string]Status{}, jobs: map[string]*job{}, busy: map[string]*job{}}
+ 	if m.catalog == nil {
+ 		m.catalog = catalog
+@@ -163,6 +164,9 @@ func (m *Manager) Installed(id string) bool {
+ 
+ // Dir is the snapshot folder of model id, "" when it is not installed.
+ func (m *Manager) Dir(id string) string {
++	if dir := m.packaged[id]; dir != "" {
++		return dir
++	}
+ 	mod, ok := m.Lookup(id)
+ 	m.mu.Lock()
+ 	s := m.status[id]
+@@ -214,6 +218,10 @@ func (m *Manager) refresh() {
+ 	}
+ 	next := map[string]Status{}
+ 	for _, mod := range m.catalog {
++		if m.Packaged(mod.ID) {
++			next[mod.ID] = Status{OnDisk: true, Installed: true}
++			continue
++		}
+ 		var s Status
+ 		rev, _ := find(m.store.Hub, mod)
+ 		ref := mod.Ref(rev)
+diff --git a/Voxt/internal/models/snapdragon.go b/Voxt/internal/models/snapdragon.go
+new file mode 100644
+index 0000000..d13f260
+--- /dev/null
++++ b/Voxt/internal/models/snapdragon.go
+@@ -0,0 +1,29 @@
++package models
++
++import (
++	"os"
++	"path/filepath"
++)
++
++// The launcher verifies the GGUF assets before opening the desktop app.
++// They stay in the verification package's directory, outside the model hub.
++func snapdragonModels() map[string]string {
++	dir := os.Getenv("VOXT_SNAPDRAGON_MODELS")
++	if !filepath.IsAbs(dir) {
++		return nil
++	}
++	has := func(name string) bool {
++		info, err := os.Stat(filepath.Join(dir, name))
++		return err == nil && info.Mode().IsRegular() && info.Size() > 0
++	}
++	if !has("target.gguf") || !has("mmproj.gguf") {
++		return nil
++	}
++	found := map[string]string{ASRAccurate: dir}
++	if has("draft-4.gguf") {
++		found[ASRAccurateDraft] = dir
++	}
++	return found
++}
++
++func (m *Manager) Packaged(id string) bool { return m.packaged[id] != "" }
+diff --git a/Voxt/internal/models/volume_unix.go b/Voxt/internal/models/volume_unix.go
+new file mode 100644
+index 0000000..af074b8
+--- /dev/null
++++ b/Voxt/internal/models/volume_unix.go
+@@ -0,0 +1,24 @@
++//go:build !windows
++
++package models
++
++import (
++	"os"
++	"syscall"
++)
++
++// SameVolume reports whether a and b are folders on one volume, where
++// a model is hard-linked instead of copied.
++func SameVolume(a, b string) bool {
++	sa, err := os.Stat(a)
++	if err != nil {
++		return false
++	}
++	sb, err := os.Stat(b)
++	if err != nil {
++		return false
++	}
++	da, ok := sa.Sys().(*syscall.Stat_t)
++	db, ok2 := sb.Sys().(*syscall.Stat_t)
++	return ok && ok2 && da.Dev == db.Dev
++}
+diff --git a/Voxt/internal/models/volume_windows.go b/Voxt/internal/models/volume_windows.go
+new file mode 100644
+index 0000000..92a472f
+--- /dev/null
++++ b/Voxt/internal/models/volume_windows.go
+@@ -0,0 +1,23 @@
++package models
++
++import (
++	"os"
++	"syscall"
++)
++
++// Read the volume serial from open directories to account for mount points.
++func SameVolume(a, b string) bool {
++	volume := func(path string) (uint32, bool) {
++		dir, err := os.Open(path)
++		if err != nil {
++			return 0, false
++		}
++		defer dir.Close()
++		var info syscall.ByHandleFileInformation
++		err = syscall.GetFileInformationByHandle(syscall.Handle(dir.Fd()), &info)
++		return info.VolumeSerialNumber, err == nil
++	}
++	av, aok := volume(a)
++	bv, bok := volume(b)
++	return aok && bok && av == bv
++}
+diff --git a/Voxt/internal/omni/asr.go b/Voxt/internal/omni/asr.go
+index 0d8bc08..2172cca 100644
+--- a/Voxt/internal/omni/asr.go
++++ b/Voxt/internal/omni/asr.go
+@@ -131,7 +131,7 @@ func (a *ASR) Hold(ctx context.Context) (func(), error) {
+ // prompt.
+ func (a *ASR) Caps() asr.Caps {
+ 	context := a.spec.ASR.ContextTerms > 0
+-	return asr.Caps{Stream: true, File: true, Prompt: context, Hints: context}
++	return asr.Caps{Stream: !a.rt.cfg.FinalOnly, File: true, Prompt: context, Hints: context}
+ }
+ 
+ // Transcribe is a Final over a whole recording.
+diff --git a/Voxt/internal/omni/process.go b/Voxt/internal/omni/process.go
+index 09cc2ac..2c45f03 100644
+--- a/Voxt/internal/omni/process.go
++++ b/Voxt/internal/omni/process.go
+@@ -15,6 +15,8 @@ import (
+ 	"sync/atomic"
+ 	"syscall"
+ 	"time"
++
++	"github.com/sgl-project/sglang-omni/Voxt/internal/childprocess"
+ )
+ 
+ // endpoint is a ready server's address and name.
+@@ -87,7 +89,16 @@ func spawn(cfg Config, spec Spec, dir, draft string, cacheLimit bool) (*process,
+ 			}
+ 		}
+ 	}
++	if cfg.FinalOnly {
++		if value := os.Getenv("VOXT_AUDIO_BACKEND"); value != "" {
++			args = append(args, "--audio-backend", value)
++		}
++		if value := os.Getenv("VOXT_DRAFT_BACKEND"); value != "" && draft != "" {
++			args = append(args, "--draft-backend", value)
++		}
++	}
+ 	cmd := exec.Command(bin, args...)
++	childprocess.Background(cmd)
+ 	cmd.Env = append(serverEnv(os.Environ()), cfg.Env...)
+ 	stdin, err := cmd.StdinPipe()
+ 	if err != nil {
+@@ -250,6 +261,7 @@ func knowsCacheLimit(cfg Config) bool {
+ 	defer cancel()
+ 	cmd := exec.CommandContext(ctx, cfg.Binary, "--model-kind", kindQwen3ASR,
+ 		"--model-directory", os.DevNull, "--cache-limit-mb", "-2")
++	childprocess.Background(cmd)
+ 	cmd.Env = append(serverEnv(os.Environ()), cfg.Env...)
+ 	out, _ := cmd.CombinedOutput()
+ 	return strings.Contains(string(out), "--cache-limit-mb must")
+diff --git a/Voxt/internal/omni/runtime.go b/Voxt/internal/omni/runtime.go
+index 93e9201..88db9eb 100644
+--- a/Voxt/internal/omni/runtime.go
++++ b/Voxt/internal/omni/runtime.go
+@@ -38,6 +38,8 @@ const (
+ type Config struct {
+ 	// Binary is qwen3_asr_server (Locate finds it).
+ 	Binary string
++	// FinalOnly runs a GGUF backend that accepts finished recordings.
++	FinalOnly bool
+ 	// Env is added to the servers' environment (VoxtNew's, without the
+ 	// dynamic loader's DYLD_ settings).
+ 	Env []string
+diff --git a/Voxt/internal/settings/settings.go b/Voxt/internal/settings/settings.go
+index df2b570..21b3135 100644
+--- a/Voxt/internal/settings/settings.go
++++ b/Voxt/internal/settings/settings.go
+@@ -348,10 +348,9 @@ func (u Updates) BetaOn(running string) bool {
+ // alone transcribes, with Shift translates, with Control rewrites;
+ // Control+Option+V pastes the last result.
+ const (
+-	DefaultTranscribe = "RightOption"
+-	DefaultTranslate  = "RightOption+Shift"
+-	DefaultRewrite    = "Control+RightOption"
+-	DefaultPasteLast  = "Control+Option+V"
++	DefaultTranslate = "RightOption+Shift"
++	DefaultRewrite   = "Control+RightOption"
++	DefaultPasteLast = "Control+Option+V"
+ 	// DefaultCancel is the cancel shortcut's default, in one place: it
+ 	// only acts while a session records or the answer card shows.
+ 	DefaultCancel = "Escape"
+diff --git a/Voxt/internal/settings/transcribe_other.go b/Voxt/internal/settings/transcribe_other.go
+new file mode 100644
+index 0000000..9d97015
+--- /dev/null
++++ b/Voxt/internal/settings/transcribe_other.go
+@@ -0,0 +1,5 @@
++//go:build !windows
++
++package settings
++
++const DefaultTranscribe = "RightOption"
+diff --git a/Voxt/internal/settings/transcribe_windows.go b/Voxt/internal/settings/transcribe_windows.go
+new file mode 100644
+index 0000000..c034ef5
+--- /dev/null
++++ b/Voxt/internal/settings/transcribe_windows.go
+@@ -0,0 +1,3 @@
++package settings
++
++const DefaultTranscribe = "Control+Option+Space"
+diff --git a/Voxt/internal/uitext/keys.go b/Voxt/internal/uitext/keys.go
+index f6b54df..77a7def 100644
+--- a/Voxt/internal/uitext/keys.go
++++ b/Voxt/internal/uitext/keys.go
+@@ -7,6 +7,7 @@ package uitext
+ 
+ import (
+ 	"errors"
++	"runtime"
+ 	"strings"
+ 
+ 	"github.com/sgl-project/sglang-omni/Voxt/internal/helper/proto"
+@@ -29,6 +30,9 @@ func HotkeyTextFor(translator *i18n.Translator, keys string) string {
+ 		return strings.TrimSpace(keys)
+ 	}
+ 	glyph := map[string]string{proto.ModControl: "⌃", proto.ModOption: "⌥", proto.ModShift: "⇧", proto.ModCommand: "⌘"}
++	if runtime.GOOS == "windows" {
++		glyph = map[string]string{proto.ModControl: "Ctrl", proto.ModOption: "Alt", proto.ModShift: "Shift", proto.ModCommand: "Win"}
++	}
+ 	var parts []string
+ 	if _, ok := c.Mods[proto.ModFn]; ok {
+ 		parts = append(parts, "fn")
+@@ -50,6 +54,9 @@ func HotkeyTextFor(translator *i18n.Translator, keys string) string {
+ 	if c.Key != "" {
+ 		parts = append(parts, keyGlyphFor(translator, c.Key))
+ 	}
++	if runtime.GOOS == "windows" {
++		return strings.Join(parts, "+")
++	}
+ 	// Glyphs run together, and a key's name follows them (⌃⌥⇧⌘V,
+ 	// ⌥Space, as macOS writes them); other words keep a space around them
+ 	// (fn F5, Right ⌘, ⌥ Mouse button 4).
+diff --git a/Voxt/models_omni.go b/Voxt/models_omni.go
+index 6cbe87f..c676074 100644
+--- a/Voxt/models_omni.go
++++ b/Voxt/models_omni.go
+@@ -69,7 +69,7 @@ func (a *app) omniRuntime() (*omni.Runtime, error) {
+ 		return nil, a.omniErr
+ 	}
+ 	speech := keepIdle(a.keepSetting()) // models_keep.go
+-	a.omniRT = omniNewRuntime(omni.Config{Binary: bin, Log: a.omniLog, IdleTimeout: speech,
++	a.omniRT = omniNewRuntime(omni.Config{Binary: bin, FinalOnly: os.Getenv("VOXT_SNAPDRAGON_MODELS") != "", Log: a.omniLog, IdleTimeout: speech,
+ 		OnModel: a.modelEvents(workerOmni), BeforeLoad: a.beforeLoad()}) // family_runtime.go
+ 	return a.omniRT, nil
+ }
+diff --git a/Voxt/session_hotkeys.go b/Voxt/session_hotkeys.go
+index 6e60a13..6f123f9 100644
+--- a/Voxt/session_hotkeys.go
++++ b/Voxt/session_hotkeys.go
+@@ -9,6 +9,7 @@ import (
+ 	"context"
+ 	"errors"
+ 	"fmt"
++	"runtime"
+ 	"slices"
+ 	"strings"
+ 	"time"
+@@ -309,7 +310,9 @@ func (a *app) syncHotkeys() {
+ // helper's event tap is not installed (no Accessibility), and removes
+ // them once it is. Only the real app (it needs mygo.App).
+ func (a *app) syncCarbon(plan hotkey.Plan) {
+-	if !a.hasMenu {
++	// Both processes use RegisterHotKey on Windows. Leave the chord to the
++	// helper that captures the foreground window along with the key event.
++	if runtime.GOOS == "windows" || !a.hasMenu {
+ 		return
+ 	}
+ 	var want []string
+diff --git a/Voxt/settings_disk_unix.go b/Voxt/settings_disk_unix.go
+new file mode 100644
+index 0000000..e6d71bc
+--- /dev/null
++++ b/Voxt/settings_disk_unix.go
+@@ -0,0 +1,23 @@
++//go:build !windows
++
++package main
++
++import (
++	"path/filepath"
++	"syscall"
++)
++
++// diskFree is the space free for the user on path's disk (a variable:
++// snapshots pin it, snapshot_env_test.go).
++var diskFree = func(path string) int64 {
++	var st syscall.Statfs_t
++	for p := path; p != "" && p != "/" && p != "."; p = filepath.Dir(p) {
++		if syscall.Statfs(p, &st) == nil {
++			return int64(st.Bavail) * int64(st.Bsize)
++		}
++	}
++	if syscall.Statfs("/", &st) == nil {
++		return int64(st.Bavail) * int64(st.Bsize)
++	}
++	return 0
++}
+diff --git a/Voxt/settings_disk_windows.go b/Voxt/settings_disk_windows.go
+new file mode 100644
+index 0000000..27ac047
+--- /dev/null
++++ b/Voxt/settings_disk_windows.go
+@@ -0,0 +1,26 @@
++package main
++
++import (
++	"path/filepath"
++	"syscall"
++	"unsafe"
++)
++
++var getDiskFreeSpace = syscall.NewLazyDLL("kernel32.dll").NewProc("GetDiskFreeSpaceExW")
++
++var diskFree = func(path string) int64 {
++	for p := filepath.Clean(path); ; p = filepath.Dir(p) {
++		name, err := syscall.UTF16PtrFromString(p)
++		if err != nil {
++			return 0
++		}
++		var available uint64
++		ok, _, _ := getDiskFreeSpace.Call(uintptr(unsafe.Pointer(name)), uintptr(unsafe.Pointer(&available)), 0, 0)
++		if ok != 0 {
++			return int64(available)
++		}
++		if filepath.Dir(p) == p {
++			return 0
++		}
++	}
++}
+diff --git a/Voxt/settings_storage_controller.go b/Voxt/settings_storage_controller.go
+index fd3b279..c712114 100644
+--- a/Voxt/settings_storage_controller.go
++++ b/Voxt/settings_storage_controller.go
+@@ -16,7 +16,6 @@ import (
+ 	"path/filepath"
+ 	"slices"
+ 	"strings"
+-	"syscall"
+ 
+ 	"github.com/egoist/mygo"
+ 	fammodels "github.com/hehehai/actnowkit/models"
+@@ -105,21 +104,6 @@ func (a *app) home() string {
+ 	return a.dataDir()
+ }
+ 
+-// diskFree is the space free for the user on path's disk (a variable:
+-// snapshots pin it, snapshot_env_test.go).
+-var diskFree = func(path string) int64 {
+-	var st syscall.Statfs_t
+-	for p := path; p != "" && p != "/" && p != "."; p = filepath.Dir(p) {
+-		if syscall.Statfs(p, &st) == nil {
+-			return int64(st.Bavail) * int64(st.Bsize)
+-		}
+-	}
+-	if syscall.Statfs("/", &st) == nil {
+-		return int64(st.Bavail) * int64(st.Bsize)
+-	}
+-	return 0
+-}
+-
+ // loadStorage measures the folders in the background.
+ func (a *app) loadStorage() {
+ 	if a.stReport != nil || a.stLoading {

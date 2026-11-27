@@ -2,6 +2,10 @@
 
 Windows ARM64 本地推理移植。开发与实机验收顺序见 [PLAN.md](PLAN.md)，当前工程状态见 [Tasks/INDEX.md](Tasks/INDEX.md)。
 
+## 骁龙本桌面听写
+
+在已通过原生 HTP 验证的 Windows ARM64 机器上，从仓库根目录运行 `.\scripts\win-arm64\update_and_verify.ps1` 即可安装并打开固定版 Voxt。以后双击桌面的 **Voxt Snapdragon Pilot 1**，在输入框按 **Ctrl+Alt+Space** 开始录音，再按一次结束并回填。详见 [Windows 用户测试说明](Handoff.MD)。
+
 ## 复现 Mac 基准
 
 以下命令从仓库根目录运行。需要 Python 3.11+、Voxt 指定的 Go 工具链，以及能运行的 Mac MLX 基准二进制。 `patches/voxt-mlx-baseline.patch` 是在锁定 SGLang-Omni 提交上重建 Mac 基准的改动。准备脚本另在临时副本中记录 Voxt 实际收到的 SSE 完成事件。

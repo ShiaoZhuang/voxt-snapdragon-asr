@@ -1,6 +1,18 @@
 # Voxt 骁龙实机验收
 
-## 固定入口
+## Windows ARM64 用户测试版 Pilot 1
+
+在此前已经完成 HTP 实测的骁龙本仓库根目录，用普通 PowerShell 执行。若当前窗口曾设置过实验路由，请先移除该覆盖，或打开新窗口。
+
+```powershell
+.\scripts\win-arm64\update_and_verify.ps1
+```
+
+默认入口安装并打开原版 Voxt 桌面应用的 Windows 移植版。首次安装校验已有的模型、后端、签名 DSP 库及桌面包，用公开短句检查真实转录和 HTP 放置。通过后生成固定版本目录及桌面快捷方式 **Voxt Snapdragon Pilot 1**。之后用快捷方式即可离线打开同一版。手动入口是 `.local/voxt-user-test/voxt-snapdragon-user-test-1/open_voxt_user_test.ps1`。三个 GGUF 优先与已有模型建立硬链接，跨卷时复制。应用使用原始卷积布局、全 HTP0 音频编码、Q8_0 Target、Q4_0 DFlash、队列深度 8 和 ubatch 512。
+
+首次如看到 Voxt 欢迎引导，可选稍后设置，模型会自动识别。打开普通记事本，把光标放在正文，按一次 **Ctrl+Alt+Space** 开始录音，说完再按一次。观察文字是否进入原输入框、Voxt 左侧「历史」是否出现同一句话。此版本测试停止录音后的最终转录。录音使用 Windows 默认麦克风，需要允许桌面应用访问麦克风。建议各试一条短句和一段日常长话，记录第二次按键后到文字出现的时间。安装报告在命令最后显示；应用启动日志在固定版本目录的 `logs` 下。
+
+## 性能实验入口
 
 旧启动器只更新独立工作树中的测试代码。要启用实时进度和超时保护，请在骁龙本仓库根目录刷新本地启动器一次：
 
@@ -9,15 +21,15 @@ git fetch origin veri/native-win-arm64
 if ($LASTEXITCODE -eq 0) { git restore --source=FETCH_HEAD -- scripts/win-arm64/update_and_verify.ps1 }
 ```
 
-以后每轮在同一仓库根目录运行同一条命令：
+要继续做性能实验，在同一仓库根目录运行：
 
 ```powershell
-.\scripts\win-arm64\update_and_verify.ps1
+.\scripts\win-arm64\update_and_verify.ps1 -Route Explore
 ```
 
 启动器会显示正在运行的阶段、错误和每 30 秒的等待提示。验证阶段超过 35 分钟会退出并保留已有报告。可用 `-Route QnnLive` 单独跑混合转录对照，或用 `-Route GgmlHexagon` 单独跑 GGML。
 
-固定入口默认运行 Explore。736e7af 实机已完成的 Hetero、Wait、Fusion、Dispatch、QnnHtpAudio 和 HtpSuite 已退出自动队列。即使归档已移走也不会重新调度这些整套实验。保留两次全 HTP 原始 JSONL 的机器会离线对比 3a82b3f 与 736e7af 的长音频耗时，并把完整对照写入本次日志中的 `historical-htp-comparison.txt`。
+需要回到原性能验证流程时，显式选择 `-Route Explore`。736e7af 实机已完成的 Hetero、Wait、Fusion、Dispatch、QnnHtpAudio 和 HtpSuite 已退出自动队列。即使归档已移走也不会重新调度这些整套实验。保留两次全 HTP 原始 JSONL 的机器会离线对比 3a82b3f 与 736e7af 的长音频耗时，并把完整对照写入本次日志中的 `historical-htp-comparison.txt`。
 
 本轮依次运行以下项目。各项目计时串行。之前已通过 LongPair 的机器跳过该项；后续重复执行固定命令也会跳过本机相同试验版本和 DSP 库的成功项。到达 35 分钟启动器时限或手动中断后，再执行同一命令即可继续。新候选的配对测量会在相同条件下运行对照。可以在新 PowerShell 的仓库根目录无参执行。需要单独运行某项时，可设置 `$env:VOXT_VERIFY_ROUTE` 为实验名并执行原命令。
 
@@ -28,7 +40,7 @@ if ($LASTEXITCODE -eq 0) { git restore --source=FETCH_HEAD -- scripts/win-arm64/
 | Queue | 固定每批最多 2048 个算子、融合开、阻塞等待。先测实际在途批次，队列满 8 则试 16，否则缩到观察到的峰值。记录共享队列大小、CPU 时间和同一短句的端到端耗时。 |
 | ConvLayout | 在同一份签名 v73 库上比较原有音频卷积布局和减少中间重排的新布局，记录短句与长中文的编码和整请求耗时、实际设备证据与输出一致性。 |
 
-如果上一轮在 `79c8ac8` 报 `HTP convolution output shapes or multiplicities differ`，直接运行固定入口。脚本优先读取那一轮的四条请求和两份原始 HTP 日志，从每层 IM2COL 恢复逻辑形状，再核对 GELU 实际执行的形状和步幅。看到 `Rechecking both archived HTP profiles` 表示已找到归档。若归档缺失，脚本会补采。两条音频各做四对新的热态计时，报告给出编码和端到端的配对速度比，超过 1 表示新布局更快。
+如果上一轮在 `79c8ac8` 报 `HTP convolution output shapes or multiplicities differ`，运行 Explore。脚本优先读取那一轮的四条请求和两份原始 HTP 日志，从每层 IM2COL 恢复逻辑形状，再核对 GELU 实际执行的形状和步幅。看到 `Rechecking both archived HTP profiles` 表示已找到归档。若归档缺失，Explore 会补采。两条音频各做四对新的热态计时，报告给出编码和端到端的配对速度比，超过 1 表示新布局更快。
 
 成功和失败详情在各项目子目录；最终照片请包含 `VOXT SNAPDRAGON REPORT` 中的新实验结果。历史实验仍可按路由名称显式重测。
 
