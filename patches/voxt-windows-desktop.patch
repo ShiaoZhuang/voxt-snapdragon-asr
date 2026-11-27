@@ -1,3 +1,28 @@
+diff --git a/Voxt/home_readiness_state.go b/Voxt/home_readiness_state.go
+index f8c0219..6873bbc 100644
+--- a/Voxt/home_readiness_state.go
++++ b/Voxt/home_readiness_state.go
+@@ -1,6 +1,8 @@
+ package main
+ 
+ import (
++	"runtime"
++
+ 	"github.com/sgl-project/sglang-omni/Voxt/internal/dictation"
+ 	"github.com/sgl-project/sglang-omni/Voxt/internal/helper"
+ 	"github.com/sgl-project/sglang-omni/Voxt/internal/hotkey"
+@@ -132,6 +134,11 @@ func buildHomeShortcutReadiness(translator *i18n.Translator, features settings.F
+ 			return state
+ 		}
+ 	}
++	if runtime.GOOS == "windows" && !installed {
++		state.Kind = "warn"
++		state.Text = translator.T("Shortcut unavailable: %s", uitext.HotkeyTextFor(translator, hotkeys[0].Keys))
++		return state
++	}
+ 	state.OK, state.Text = true, uitext.HotkeyTextFor(translator, hotkeys[0].Keys)
+ 	if hotkey.NeedsTap(hotkeys[0]) && !installed {
+ 		state.Warn = true
 diff --git a/Voxt/internal/childprocess/background_other.go b/Voxt/internal/childprocess/background_other.go
 new file mode 100644
 index 0000000..4240a97
@@ -50,6 +75,50 @@ index ee5cd17..107f5df 100644
  	cmd.Env = append(os.Environ(), s.cfg.Env...)
  	stdin, err := cmd.StdinPipe()
  	if err != nil {
+diff --git a/Voxt/internal/hotkey/check.go b/Voxt/internal/hotkey/check.go
+index 9904198..29aaa5d 100644
+--- a/Voxt/internal/hotkey/check.go
++++ b/Voxt/internal/hotkey/check.go
+@@ -132,7 +132,7 @@ func Check(f settings.Features) []Problem {
+ 			if !clash {
+ 				if sys := SystemShortcut(c); sys != "" {
+ 					out = append(out, Problem{Feature: feat, Index: i, Code: ProblemSystem, System: sys})
+-				} else if !c.ModifierOnly() && len(c.Mods) == 0 && !isFKey(c.Key) && !c.Mouse() && feat != CancelID {
++				} else if !c.ModifierOnly() && len(c.Mods) == 0 && !isFKey(c.Key) && c.Key != "CapsLock" && !c.Mouse() && feat != CancelID {
+ 					// F-keys and mouse buttons alone are fine; any other key alone is not.
+ 					// Cancel may be a bare key: it is only taken while a
+ 					// session records or the answer card shows.
+diff --git a/Voxt/internal/hotkey/hotkey.go b/Voxt/internal/hotkey/hotkey.go
+index 5383d46..3f01cd5 100644
+--- a/Voxt/internal/hotkey/hotkey.go
++++ b/Voxt/internal/hotkey/hotkey.go
+@@ -75,7 +75,7 @@ var keyCodes = func() map[string]int {
+ 		"E": 14, "R": 15, "Y": 16, "T": 17, "1": 18, "2": 19, "3": 20, "4": 21, "6": 22, "5": 23, "=": 24, "9": 25,
+ 		"7": 26, "-": 27, "8": 28, "0": 29, "]": 30, "O": 31, "U": 32, "[": 33, "I": 34, "P": 35, "Return": 36,
+ 		"L": 37, "J": 38, "'": 39, "K": 40, ";": 41, "\\": 42, ",": 43, "/": 44, "N": 45, "M": 46, ".": 47,
+-		"Tab": 48, "Space": 49, "`": 50, "Delete": 51, "Escape": 53,
++		"Tab": 48, "Space": 49, "`": 50, "Delete": 51, "Escape": 53, "CapsLock": 57,
+ 		"F17": 64, "F18": 79, "F19": 80, "F20": 90, "F5": 96, "F6": 97, "F7": 98, "F3": 99, "F8": 100, "F9": 101,
+ 		"F11": 103, "F13": 105, "F16": 106, "F14": 107, "F10": 109, "F12": 111, "F15": 113, "Home": 115,
+ 		"PageUp": 116, "ForwardDelete": 117, "F4": 118, "End": 119, "F2": 120, "PageDown": 121, "F1": 122,
+@@ -85,6 +85,7 @@ var keyCodes = func() map[string]int {
+ }()
+ 
+ var keyAliases = map[string]string{
++	"capslock": "CapsLock", "caps lock": "CapsLock",
+ 	"space": "Space", "return": "Return", "enter": "Return", "tab": "Tab", "escape": "Escape", "esc": "Escape",
+ 	"delete": "Delete", "backspace": "Delete", "forwarddelete": "ForwardDelete", "del": "ForwardDelete",
+ 	"home": "Home", "end": "End", "pageup": "PageUp", "pagedown": "PageDown",
+diff --git a/Voxt/internal/i18n/locales/zh-Hans/home.json b/Voxt/internal/i18n/locales/zh-Hans/home.json
+index 650a484..08e13d7 100644
+--- a/Voxt/internal/i18n/locales/zh-Hans/home.json
++++ b/Voxt/internal/i18n/locales/zh-Hans/home.json
+@@ -1,4 +1,5 @@
+ {
++  "Shortcut unavailable: %s": "快捷键不可用：%s",
+   "%d step to go": "还差 %d 步",
+   "%d steps to go": "还差 %d 步",
+   "%s (once Accessibility is allowed)": "%s（允许辅助功能后可用）",
 diff --git a/Voxt/internal/local/library.go b/Voxt/internal/local/library.go
 index 88e9c1e..d05b1eb 100644
 --- a/Voxt/internal/local/library.go
@@ -337,10 +406,21 @@ index 93e9201..88db9eb 100644
  	// dynamic loader's DYLD_ settings).
  	Env []string
 diff --git a/Voxt/internal/settings/settings.go b/Voxt/internal/settings/settings.go
-index df2b570..21b3135 100644
+index df2b570..a044893 100644
 --- a/Voxt/internal/settings/settings.go
 +++ b/Voxt/internal/settings/settings.go
-@@ -348,10 +348,9 @@ func (u Updates) BetaOn(running string) bool {
+@@ -22,10 +22,6 @@ import (
+ 	"time"
+ )
+ 
+-// Version is the schema version Defaults writes. Bump it when a field's
+-// meaning changes, and migrate older documents in Migrate.
+-const Version = 5
+-
+ // Settings is the whole document.
+ type Settings struct {
+ 	Version        int            `json:"version"`
+@@ -348,10 +344,9 @@ func (u Updates) BetaOn(running string) bool {
  // alone transcribes, with Shift translates, with Control rewrites;
  // Control+Option+V pastes the last result.
  const (
@@ -354,28 +434,53 @@ index df2b570..21b3135 100644
  	// DefaultCancel is the cancel shortcut's default, in one place: it
  	// only acts while a session records or the answer card shows.
  	DefaultCancel = "Escape"
+@@ -405,6 +400,7 @@ func Migrate(data []byte) (Settings, error) {
+ 	if s.Version < 4 {
+ 		migrateShortcuts(&s.Features)
+ 	}
++	migratePlatformTranscribe(&s)
+ 	migrateNoteKeys(data, &s.Features)
+ 	migrateShowCard(data, &s.Features)
+ 	migrateSoundPreset(&s.Audio)
 diff --git a/Voxt/internal/settings/transcribe_other.go b/Voxt/internal/settings/transcribe_other.go
 new file mode 100644
-index 0000000..9d97015
+index 0000000..b6864a2
 --- /dev/null
 +++ b/Voxt/internal/settings/transcribe_other.go
-@@ -0,0 +1,5 @@
+@@ -0,0 +1,10 @@
 +//go:build !windows
 +
 +package settings
 +
-+const DefaultTranscribe = "RightOption"
++const (
++	Version           = 5
++	DefaultTranscribe = "RightOption"
++)
++
++func migratePlatformTranscribe(*Settings) {}
 diff --git a/Voxt/internal/settings/transcribe_windows.go b/Voxt/internal/settings/transcribe_windows.go
 new file mode 100644
-index 0000000..c034ef5
+index 0000000..3a16cf8
 --- /dev/null
 +++ b/Voxt/internal/settings/transcribe_windows.go
-@@ -0,0 +1,3 @@
+@@ -0,0 +1,15 @@
 +package settings
 +
-+const DefaultTranscribe = "Control+Option+Space"
++const (
++	Version           = 6
++	DefaultTranscribe = "CapsLock"
++)
++
++// Pilot 1 shipped the tap chord below. Only replace that single default,
++// keeping a user's removed, additional, custom or differently triggered keys.
++func migratePlatformTranscribe(s *Settings) {
++	keys := s.Features.Transcribe.Hotkeys
++	if s.Version < 6 && len(keys) == 1 && oldDefault(keys[0], "Control+Option+Space") {
++		keys[0] = Hotkey{Keys: DefaultTranscribe, Trigger: TriggerTap}
++	}
++}
 diff --git a/Voxt/internal/uitext/keys.go b/Voxt/internal/uitext/keys.go
-index f6b54df..77a7def 100644
+index f6b54df..46f40a1 100644
 --- a/Voxt/internal/uitext/keys.go
 +++ b/Voxt/internal/uitext/keys.go
 @@ -7,6 +7,7 @@ package uitext
@@ -406,6 +511,43 @@ index f6b54df..77a7def 100644
  	// Glyphs run together, and a key's name follows them (⌃⌥⇧⌘V,
  	// ⌥Space, as macOS writes them); other words keep a space around them
  	// (fn F5, Right ⌘, ⌥ Mouse button 4).
+@@ -68,6 +75,8 @@ func HotkeyTextFor(translator *i18n.Translator, keys string) string {
+ // know (⎋ ↩ ⌫ ⇥) by their names, as Voxt 1.x does.
+ func keyGlyphFor(translator *i18n.Translator, k string) string {
+ 	switch k {
++	case "CapsLock":
++		return "Caps Lock"
+ 	case "Space":
+ 		return translator.T("Space")
+ 	case "Return":
+diff --git a/Voxt/main.go b/Voxt/main.go
+index cc7f783..7b49066 100644
+--- a/Voxt/main.go
++++ b/Voxt/main.go
+@@ -16,6 +16,7 @@ import (
+ 	"log"
+ 	"os"
+ 	"path/filepath"
++	"runtime"
+ 
+ 	"github.com/egoist/mygo"
+ 	"github.com/egoist/mygo/plugins/updater"
+@@ -31,6 +32,15 @@ import (
+ )
+ 
+ func main() {
++	// The detached Windows launcher supplies a per-run absolute log path.
++	// Open it in this process so the launching terminal can close.
++	if path := os.Getenv("VOXT_WINDOWS_STARTUP_LOG"); runtime.GOOS == "windows" && filepath.IsAbs(path) {
++		if f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600); err == nil {
++			os.Stderr = f
++			log.SetOutput(f)
++			log.Printf("Voxt desktop started, pid %d", os.Getpid())
++		}
++	}
+ 	// Fixture demo builds return before any application data or service wiring.
+ 	if directory := os.Getenv("VOXTNEW_DEMO_DIR"); directory != "" {
+ 		if err := runMeetingDemo(directory); err != nil {
 diff --git a/Voxt/models_omni.go b/Voxt/models_omni.go
 index 6cbe87f..c676074 100644
 --- a/Voxt/models_omni.go
@@ -419,19 +561,148 @@ index 6cbe87f..c676074 100644
  		OnModel: a.modelEvents(workerOmni), BeforeLoad: a.beforeLoad()}) // family_runtime.go
  	return a.omniRT, nil
  }
+diff --git a/Voxt/onboarding_try_state.go b/Voxt/onboarding_try_state.go
+index 8079b94..5ddfb73 100644
+--- a/Voxt/onboarding_try_state.go
++++ b/Voxt/onboarding_try_state.go
+@@ -2,6 +2,7 @@ package main
+ 
+ import (
+ 	"fmt"
++	"runtime"
+ 	"strings"
+ 	"time"
+ 
+@@ -72,6 +73,9 @@ func onboardingTimingsText(translator *i18n.Translator, snapshot session.Snapsho
+ }
+ 
+ func onboardingHotkeyText(translator *i18n.Translator, keys string) string {
++	if runtime.GOOS == "windows" {
++		return uitext.HotkeyTextFor(translator, keys)
++	}
+ 	chord, err := hotkey.Parse(keys)
+ 	if err != nil {
+ 		return strings.TrimSpace(keys)
+@@ -176,6 +180,9 @@ func onboardingKeyboard(keys string) onboardingKeyboardViewState {
+ 	state := onboardingKeyboardViewState{Visible: true, LitKeys: keyboardLit(chord)}
+ 	if chord.Key != "" && chord.Key != "Space" {
+ 		state.ExtraKey = chord.Key
++		if chord.Key == "CapsLock" {
++			state.ExtraKey = "Caps Lock"
++		}
+ 	}
+ 	return state
+ }
+diff --git a/Voxt/session_e2e_test.go b/Voxt/session_e2e_test.go
+index 1639ada..0bd3e0f 100644
+--- a/Voxt/session_e2e_test.go
++++ b/Voxt/session_e2e_test.go
+@@ -213,7 +213,7 @@ func TestSessionEndToEnd(t *testing.T) {
+ 		}
+ 	}
+ 	a.pump("the recording", func() bool { seen(); return a.sess.State == session.Recording })
+-	if !strings.Contains(a.hotkeysSent, "Active:true") {
++	if !strings.Contains(a.hotkeysSent, `"active":true`) {
+ 		t.Errorf("not active while recording: %s", a.hotkeysSent)
+ 	}
+ 	a.pump("the end", func() bool { seen(); return a.sess.State.Ended() })
+@@ -229,7 +229,7 @@ func TestSessionEndToEnd(t *testing.T) {
+ 	if p[0].Text != "Hello, VoxtNew." || p[0].TargetPID != 812 || p[1].Text != "Hello, VoxtNew." {
+ 		t.Errorf("pasted %+v", p)
+ 	}
+-	if strings.Contains(a.hotkeysSent, "Active:true") {
++	if strings.Contains(a.hotkeysSent, `"active":true`) {
+ 		t.Errorf("still active: %s", a.hotkeysSent)
+ 	}
+ 	es := a.history()
+@@ -266,7 +266,7 @@ func TestSessionReturnFinishes(t *testing.T) {
+ 			ev := script(t, hotkeyLine(0, "transcribe/0", proto.PhaseTrigger))
+ 			a := newSessionApp(t, ev, set, keys)
+ 			a.pump("the recording", func() bool { return a.sess.State == session.Recording })
+-			if !strings.Contains(a.hotkeysSent, "ID:finish") {
++			if !strings.Contains(a.hotkeysSent, `"id":"finish"`) {
+ 				t.Fatal("Return is not bound while Transcribe records")
+ 			}
+ 			a.hotkeyFired(proto.HotkeyEventParams{Binding: "finish", Phase: proto.PhaseTrigger, Behavior: proto.BehaviorTap, Front: &front})
+@@ -274,7 +274,7 @@ func TestSessionReturnFinishes(t *testing.T) {
+ 			if a.sess.State != session.Recognizing {
+ 				t.Fatalf("state after stop: %s, want recognizing", a.sess.State)
+ 			}
+-			if strings.Contains(a.hotkeysSent, "ID:finish") {
++			if strings.Contains(a.hotkeysSent, `"id":"finish"`) {
+ 				t.Fatalf("helper still swallows Return while recognizing: %s", a.hotkeysSent)
+ 			}
+ 			a.pump("the end", func() bool { return a.sess.State.Ended() })
+@@ -284,7 +284,7 @@ func TestSessionReturnFinishes(t *testing.T) {
+ 			if p := a.pasted(); len(p) != 1 || p[0].Text != "Finished sentence." || len(p[0].Press) != 0 {
+ 				t.Errorf("pasted %+v", p)
+ 			}
+-			if strings.Contains(a.hotkeysSent, "ID:finish") {
++			if strings.Contains(a.hotkeysSent, `"id":"finish"`) {
+ 				t.Errorf("Return is still bound after the session: %s", a.hotkeysSent)
+ 			}
+ 		})
+@@ -387,7 +387,7 @@ func TestSessionStreamingCard(t *testing.T) {
+ 	if len(a.pasted()) != 0 {
+ 		t.Fatalf("pasted %+v", a.pasted())
+ 	}
+-	if !strings.Contains(a.hotkeysSent, "Active:true") {
++	if !strings.Contains(a.hotkeysSent, `"active":true`) {
+ 		t.Error("Escape should close the card")
+ 	}
+ 	a.insertAnswer()
+@@ -752,3 +752,19 @@ func TestSessionInputSwitches(t *testing.T) {
+ 		t.Errorf("uploads %d, %d bytes", calls, size)
+ 	}
+ }
++
++// The real helper stamps key events with its latest generation. Repeated
++// overlay redraws must not invalidate a tap already on its way from the OS.
++func TestHotkeyConfigureStableAcrossRedraws(t *testing.T) {
++	a := newSessionApp(t, "", func(s *settings.Settings) {
++		s.Features.Transcribe.Hotkeys = []settings.Hotkey{{Keys: "CapsLock", Trigger: settings.TriggerTap}}
++	}, nil)
++	a.syncHotkeys()
++	initial := a.hotkeyGen
++	for range 20 {
++		a.overlaySync()
++	}
++	if initial == 0 || a.hotkeyGen != initial {
++		t.Fatalf("unchanged hotkeys advanced generation %d to %d", initial, a.hotkeyGen)
++	}
++}
 diff --git a/Voxt/session_hotkeys.go b/Voxt/session_hotkeys.go
-index 6e60a13..6f123f9 100644
+index 6e60a13..acc27e1 100644
 --- a/Voxt/session_hotkeys.go
 +++ b/Voxt/session_hotkeys.go
-@@ -9,6 +9,7 @@ import (
+@@ -7,8 +7,9 @@ package main
+ 
+ import (
  	"context"
++	"encoding/json"
  	"errors"
- 	"fmt"
+-	"fmt"
 +	"runtime"
  	"slices"
  	"strings"
  	"time"
-@@ -309,7 +310,9 @@ func (a *app) syncHotkeys() {
+@@ -263,7 +264,14 @@ func (a *app) syncHotkeys() {
+ 		// The card's single-letter keys (#4127) bind only while it shows.
+ 		params.Bindings = append(slices.Clone(params.Bindings), hotkey.CardBindings(cardGeneration, plan.Cancel)...)
+ 	}
+-	key := fmt.Sprintf("%+v", params)
++	// Compare the wire data. Formatting the struct would include addresses of
++	// freshly allocated key codes and would supersede events on every redraw.
++	wire, err := json.Marshal(params)
++	if err != nil {
++		a.logs.Append(core.LogEntry{Time: time.Now(), Level: core.SeverityWarning, Source: sessionSource, Message: "hotkey.configure: " + err.Error()})
++		return
++	}
++	key := string(wire)
+ 	if key == a.hotkeysSent {
+ 		return
+ 	}
+@@ -309,7 +317,9 @@ func (a *app) syncHotkeys() {
  // helper's event tap is not installed (no Accessibility), and removes
  // them once it is. Only the real app (it needs mygo.App).
  func (a *app) syncCarbon(plan hotkey.Plan) {

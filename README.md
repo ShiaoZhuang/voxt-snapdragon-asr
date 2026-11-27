@@ -4,7 +4,7 @@ Windows ARM64 本地推理移植。开发与实机验收顺序见 [PLAN.md](PLAN
 
 ## 骁龙本桌面听写
 
-在已通过原生 HTP 验证的 Windows ARM64 机器上，从仓库根目录运行 `.\scripts\win-arm64\update_and_verify.ps1` 即可安装并打开固定版 Voxt。以后双击桌面的 **Voxt Snapdragon Pilot 1**，在输入框按 **Ctrl+Alt+Space** 开始录音，再按一次结束并回填。详见 [Windows 用户测试说明](Handoff.MD)。
+在已通过原生 HTP 验证的 Windows ARM64 机器上，从仓库根目录运行 `.\scripts\win-arm64\update_and_verify.ps1` 即可安装并打开固定版 Voxt。以后双击桌面的 **Voxt Snapdragon Pilot 1**，在输入框按 **Caps Lock** 开始录音，再按一次结束并回填。详见 [Windows 用户测试说明](Handoff.MD)。
 
 ## 复现 Mac 基准
 

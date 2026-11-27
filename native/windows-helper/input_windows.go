@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -27,17 +28,6 @@ var keyState = ui32.NewProc("GetAsyncKeyState")
 var windowClass = ui32.NewProc("GetClassNameW")
 var windowStyle = ui32.NewProc("GetWindowLongW")
 
-type binding struct {
-	ID        string
-	Key       *int
-	Modifiers map[string]string
-	Behavior  string
-}
-type keyConfig struct {
-	Sequence   uint64
-	Generation int64
-	Bindings   []binding
-}
 type keyCall struct {
 	config *keyConfig
 	answer chan map[string]any
@@ -93,7 +83,13 @@ func (w *windowsInput) watch(notify func(string, any)) {
 	timer := time.NewTicker(20 * time.Millisecond)
 	defer timer.Stop()
 	const id = 1
-	var current string
+	var current shortcut
+	statusFile := os.Getenv("VOXT_WINDOWS_HOTKEY_STATUS")
+	thread, _, _ := getKeyThread.Call()
+	caps := capsListener{recipient: thread}
+	var first winMessage
+	peekInput.Call(uintptr(unsafe.Pointer(&first)), 0, 0, 0, 0)
+	defer caps.close()
 	var sequence uint64
 	var generation int64
 	var count int
@@ -107,33 +103,46 @@ func (w *windowsInput) watch(notify func(string, any)) {
 			c := req.config
 			if c != nil && (c.Sequence == 0 || c.Sequence >= sequence) {
 				sequence, generation = c.Sequence, c.Generation
-				bound := ""
-				for _, b := range c.Bindings {
-					if b.Key != nil && *b.Key == 49 && len(b.Modifiers) == 2 && b.Modifiers["control"] != "" && b.Modifiers["option"] != "" && b.Behavior == "tap" && strings.HasPrefix(b.ID, "transcribe/") {
-						bound = b.ID
-						break
-					}
-				}
+				bound, requested := transcribeShortcut(c.Bindings)
 				if current != bound {
-					if current != "" {
+					if current.key != 0 {
+						caps.close()
 						unregisterKey.Call(0, id)
 					}
-					current, problem = "", ""
-					if bound != "" {
-						ok, _, err := registerKey.Call(0, id, 0x4003, 0x20) // no repeat, Control + Alt + Space
-						if ok == 0 {
-							problem = fmt.Sprintf("Ctrl+Alt+Space unavailable: %v", err)
-						} else {
-							current = bound
+					current = shortcut{}
+				}
+				problem = ""
+				if current.key == 0 && bound.key != 0 {
+					ok, _, err := registerKey.Call(0, id, bound.modifiers, bound.key)
+					if ok == 0 {
+						code, _ := err.(syscall.Errno)
+						problem = fmt.Sprintf("%s RegisterHotKey(vk=0x%02X, modifiers=0x%04X): Win32 error %d: %v", bound.name, bound.key, bound.modifiers, code, err)
+					} else {
+						current = bound
+						if bound.key == vkCapital {
+							if hookErr := caps.start(); hookErr != nil {
+								unregisterKey.Call(0, id)
+								current = shortcut{}
+								problem = hookErr.Error()
+							}
 						}
 					}
 				}
-				if bound == "" && len(c.Bindings) > 0 {
-					problem = "Set Transcribe to Ctrl+Alt+Space (tap)."
+				if requested && bound.key == 0 {
+					problem = "Set Transcribe to Caps Lock or Ctrl+Alt+Space (tap)."
+				}
+				if requested {
+					state := registrationStatus{Installed: current.key != 0, Binding: bound.name, Error: problem}
+					if err := writeHotkeyStatus(statusFile, state); err != nil {
+						fmt.Fprintln(os.Stderr, "hotkey status file:", err)
+					}
+					if problem != "" {
+						fmt.Fprintln(os.Stderr, "hotkey:", problem)
+					}
 				}
 			}
 			n := 0
-			if current != "" {
+			if current.key != 0 {
 				n = 1
 			}
 			req.answer <- map[string]any{"installed": n != 0, "accessibility": true, "bindings": n, "events": count, "error": problem}
@@ -144,12 +153,16 @@ func (w *windowsInput) watch(notify func(string, any)) {
 				if ok == 0 {
 					break
 				}
-				if msg.wparam != id || current == "" {
+				source := uintptr(id)
+				if current.key == vkCapital {
+					source = capsHookMessageID
+				}
+				if current.key == 0 || msg.wparam != source || msg.lparam>>16 != current.key {
 					continue
 				}
 				_, _, front := frontWindow()
 				count++
-				notify("hotkey.event", map[string]any{"binding": current, "generation": generation, "behavior": "tap", "phase": "trigger", "front": front})
+				notify("hotkey.event", map[string]any{"binding": current.id, "generation": generation, "behavior": "tap", "phase": "trigger", "front": front})
 			}
 		}
 	}

@@ -27,9 +27,37 @@ try {
         Write-Host '[voxt] Resolving the verified all-HTP backend and models.'
         $backendScript = Join-Path $PSScriptRoot 'start_user_backend.ps1'
         $params = @{ InstallDirectory=$InstallDirectory; BuildDirectory=$BuildDirectory }
-        Write-Host '[voxt] Checking one public recording on the frozen backend.'
-        $cfg = & $backendScript @params -LogDirectory $LogDirectory -PassThru
-        $notes.Add('All-HTP Q8 Target + Q4 DFlash + original audio layout | backend transcription self-check: PASS')
+        # Reuse Pilot 1's completed device test only for the same verified native
+        # binaries, signed DSP pair and GGUFs. ResolveOnly checks the source hashes.
+        $previous = Join-Path $base 'voxt-snapdragon-user-test-1/pilot.json'
+        $reuseBackend = $false
+        $nativeManifest = Get-Content -Raw -LiteralPath (Join-Path $BuildDirectory 'hexagon/verify_native_manifest.json') | ConvertFrom-Json
+        $assets = Get-Content -Raw -LiteralPath (Join-Path $InstallDirectory 'verify_manifest.json') | ConvertFrom-Json
+        $lock = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot '../../sources.lock.json') | ConvertFrom-Json
+        if (Test-Path -LiteralPath $previous -PathType Leaf) {
+            try {
+                $prior = Get-Content -Raw -LiteralPath $previous | ConvertFrom-Json
+                $reuseBackend = $prior.Tag -eq 'voxt-snapdragon-user-test-1'
+                foreach ($name in 'qwen3_asr_server.exe','OpenCL.dll') {
+                    $reuseBackend = $reuseBackend -and $prior.Files.("backend/$name") -eq $nativeManifest.files.$name
+                }
+                foreach ($name in 'models/target.gguf','models/mmproj.gguf','models/draft-4.gguf') {
+                    $reuseBackend = $reuseBackend -and $prior.Files.$name -eq $assets.files.$name
+                }
+                foreach ($f in $lock.geniex_htp.files.PSObject.Properties) {
+                    $reuseBackend = $reuseBackend -and $prior.Files.("ops/$($f.Name)") -eq $f.Value
+                }
+            } catch { $reuseBackend = $false }
+        }
+        if ($reuseBackend) {
+            $cfg = & $backendScript @params -ResolveOnly
+            Write-Host '[voxt] Reusing the matching all-HTP backend test from Pilot 1.'
+            $notes.Add('All-HTP backend self-check: reused verified Pilot 1 result')
+        } else {
+            Write-Host '[voxt] Checking one public recording on the frozen backend.'
+            $cfg = & $backendScript @params -LogDirectory $LogDirectory -PassThru
+            $notes.Add('All-HTP Q8 Target + Q4 DFlash + original audio layout | backend transcription self-check: PASS')
+        }
 
         $archive = Join-Path $stage 'desktop.zip'
         $url = "https://github.com/ShiaoZhuang/voxt-snapdragon-asr/releases/download/$($release.tag)/$($release.asset)"
@@ -41,7 +69,6 @@ try {
         Expand-Archive -LiteralPath $archive -DestinationPath $desktop
         Remove-Item -LiteralPath $archive
         $bin = (New-Item -ItemType Directory -Path (Join-Path $stage 'backend')).FullName
-        $nativeManifest = Get-Content -Raw -LiteralPath (Join-Path $BuildDirectory 'hexagon/verify_native_manifest.json') | ConvertFrom-Json
         $hashes = [ordered]@{}
         foreach ($file in 'qwen3_asr_server.exe','OpenCL.dll') {
             Copy-Item -LiteralPath (Join-Path (Split-Path $cfg.Server) $file) -Destination $bin
@@ -51,7 +78,6 @@ try {
         }
         # Keep the signed DSP executable and its catalog together, independent of GenieX updates.
         $ops = (New-Item -ItemType Directory -Path (Join-Path $stage 'ops')).FullName
-        $lock = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot '../../sources.lock.json') | ConvertFrom-Json
         foreach ($f in $lock.geniex_htp.files.PSObject.Properties) {
             Copy-Item -LiteralPath (Join-Path $cfg.Environment.GGML_HEXAGON_LIBHTP_DIR $f.Name) -Destination $ops
             if ((Get-FileHash -LiteralPath (Join-Path $ops $f.Name)).Hash -ne $f.Value) { throw "DSP snapshot hash mismatch: $($f.Name)" }
@@ -61,7 +87,6 @@ try {
             $hashes["desktop/$file"] = (Get-FileHash -LiteralPath (Join-Path $desktop $file)).Hash
         }
         $models = (New-Item -ItemType Directory -Path (Join-Path $stage 'models')).FullName
-        $assets = Get-Content -Raw -LiteralPath (Join-Path $InstallDirectory 'verify_manifest.json') | ConvertFrom-Json
         foreach ($name in 'target.gguf','mmproj.gguf','draft-4.gguf') {
             $from = Join-Path $cfg.Models $name
             $to = Join-Path $models $name
@@ -93,7 +118,7 @@ try {
     }
     & $start
     $notes.Add("Voxt ARM64 desktop | $($release.tag) | open: $start")
-    $notes.Add('User check: focus Notepad, press Ctrl+Alt+Space, speak, press again. Check the text and Voxt History.')
+    $notes.Add('User check: focus Notepad, tap Caps Lock, speak, tap Caps Lock again. Check the text and Voxt History.')
 } catch {
     $notes.Add("Desktop pilot INCOMPLETE | $($_.Exception.Message)")
     throw
