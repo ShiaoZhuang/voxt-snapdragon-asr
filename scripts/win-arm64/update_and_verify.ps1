@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [string]$InstallDirectory,
-    [ValidateSet('Hetero', 'HtpSuite', 'AudioEncoder', 'All', 'QnnLive', 'GgmlHexagon')][string]$Route = 'Hetero'
+    [ValidateSet('Explore', 'Hetero', 'Fusion', 'Dispatch', 'Wait', 'QnnHtpAudio', 'HtpSuite', 'AudioEncoder', 'All', 'QnnLive', 'GgmlHexagon')][string]$Route = 'Explore'
 )
 
 $ErrorActionPreference = 'Stop'

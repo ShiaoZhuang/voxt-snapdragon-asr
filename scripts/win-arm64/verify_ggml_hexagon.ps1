@@ -2,7 +2,7 @@
 param(
     [switch]$PlacementMatrix,
     [switch]$HtpSuite,
-    [ValidateSet('Hetero')][string]$Study,
+    [ValidateSet('Explore', 'Hetero', 'Fusion', 'Dispatch', 'Wait', 'QnnHtpAudio', 'HtpSuite')][string]$Study,
     [switch]$AudioComparison,
     [Parameter(Mandatory)][string]$InstallDirectory,
     [Parameter(Mandatory)][string]$BuildDirectory,
@@ -126,19 +126,9 @@ foreach ($run in $previousRuns) {
 }
 
 if ($Study -or $HtpSuite) {
-    $runs = @{
-        Hetero = @('measure_hetero_suite.py', 'hetero-suite-summary.txt')
-        HtpSuite = @('measure_htp_suite.py', 'htp-suite-summary.txt')
-    }
     $name = if ($HtpSuite) { 'HtpSuite' } else { $Study }
-    $runner, $summaryFile = $runs[$name]
-    $resultPath = Join-Path $LogDirectory $summaryFile
-    & python -u (Join-Path $PSScriptRoot $runner) --server (Join-Path $product 'bin/qwen3_asr_server.exe') --assets $InstallDirectory --ops $ops --logs $LogDirectory | Out-Host
-    $status = $LASTEXITCODE
-    if (Test-Path -LiteralPath $resultPath) {
-        foreach ($line in (Get-Content -Encoding UTF8 -LiteralPath $resultPath)) { $Summary.Add($line) }
-    }
-    if ($status -ne 0) { throw "$name failed (exit $status); see $LogDirectory." }
+    & (Join-Path $PSScriptRoot 'run_acceleration_studies.ps1') -Study $name -Product $product -Ops $ops `
+        -InstallDirectory $InstallDirectory -LogDirectory $LogDirectory -Summary $Summary
     return
 }
 

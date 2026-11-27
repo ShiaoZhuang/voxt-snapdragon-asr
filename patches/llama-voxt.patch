@@ -754,3 +754,39 @@ diff --git a/src/llama-context.cpp b/src/llama-context.cpp
      if (strcmp(name, "ggml_backend_split_buffer_type") == 0) {
          return (void *) ggml_backend_hexagon_split_buffer_type;
      }
+--- a/tools/mtmd/models/qwen3a.cpp
++++ b/tools/mtmd/models/qwen3a.cpp
+@@ -1,4 +1,7 @@
+ #include "models.h"
++
++#include <cstdlib>
++#include <cstring>
+
+ ggml_cgraph * mtmd_graph_qwen3a::build() {
+     // Ref implementation: https://github.com/QwenLM/Qwen3-ASR/blob/main/qwen_asr/core/transformers_backend/modeling_qwen3_asr.py
+@@ -64,9 +67,22 @@
+         ggml_tensor * pos_tmp = ggml_view_2d(ctx0, model.position_embeddings,
+             model.position_embeddings->ne[0], tokens_per_chunk,
+             model.position_embeddings->nb[1], 0);
+-        ggml_tensor * tgt = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32,
+-            model.position_embeddings->ne[0], n_pos);
+-        inp = ggml_add(ctx0, inp, ggml_repeat(ctx0, pos_tmp, tgt));
++        const char * broadcast = std::getenv("VOXT_AUDIO_POS_BROADCAST");
++        if (broadcast && std::strcmp(broadcast, "1") == 0 &&
++            ggml_is_contiguous(inp) && ggml_is_contiguous(pos_tmp)) {
++            // One row is a complete chunk. The same position row applies to every chunk.
++            const int64_t d_model = inp->ne[0];
++            const int64_t chunk_elements = d_model * tokens_per_chunk;
++            ggml_tensor * chunks = ggml_reshape_2d(ctx0, inp, chunk_elements, n_chunks);
++            ggml_tensor * pos_row = ggml_reshape_1d(ctx0, pos_tmp, chunk_elements);
++            ggml_tensor * sum = ggml_add(ctx0, chunks, pos_row);
++            cb(sum, "voxt_pos_broadcast_add", -1);
++            inp = ggml_reshape_2d(ctx0, sum, d_model, n_pos);
++        } else {
++            ggml_tensor * repeated = ggml_repeat(ctx0, pos_tmp, inp);
++            cb(repeated, "voxt_pos_repeat", -1);
++            inp = ggml_add(ctx0, inp, repeated);
++        }
+     }
+
+     ggml_tensor * cur = build_vit(inp, n_pos,

@@ -1,23 +1,51 @@
 [CmdletBinding()]
 param(
     [switch]$PlacementMatrix,
+    [string]$HtpAudioOpsDirectory,
     [Parameter(Mandatory)][string]$InstallDirectory,
     [Parameter(Mandatory)][string]$BuildDirectory,
     [Parameter(Mandatory)][string]$LogDirectory,
     [Parameter(Mandatory)][AllowEmptyCollection()][System.Collections.Generic.List[string]]$Summary
 )
 $ErrorActionPreference = 'Stop'
-$Summary.Add('QNN live | GPU prefill and draft | HTP eight-position Target verification')
+$samplePlacement = $PlacementMatrix -or [bool]$HtpAudioOpsDirectory
+if ($HtpAudioOpsDirectory) {
+    $LogDirectory = (New-Item -ItemType Directory -Path (Join-Path $LogDirectory 'qnn-htp-audio')).FullName
+    $Summary.Add('zh-plain-1 | GGML HTP audio, GPU Target prefill and Q4 draft | GPU vs QNN HTP full eight-position verification | three fresh-server requests per arm, DSP profiling on')
+} else { $Summary.Add('QNN live | GPU prefill and draft | HTP eight-position Target verification') }
 & (Join-Path $PSScriptRoot 'verify_replay_assets.ps1') -InstallDirectory $InstallDirectory
 $python = @('qnn-probe-venv', 'qnn-probe-venv-arm64') | ForEach-Object {
     Join-Path (Get-Location).Path ".local/$_/Scripts/python.exe"
 } | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
-if (!$python) { throw 'QNN Python environment from the device replay is required.' }
-
-Write-Host '[voxt] Building the native backend for QNN live.'
-& (Join-Path $PSScriptRoot 'build_native.ps1') -BuildDirectory $BuildDirectory -BackendOnly | Out-Host
+if (!$HtpAudioOpsDirectory) {
+    if (!$python) { throw 'QNN Python environment from the device replay is required.' }
+    Write-Host '[voxt] Building the native backend for QNN live.'
+    & (Join-Path $PSScriptRoot 'build_native.ps1') -BuildDirectory $BuildDirectory -BackendOnly | Out-Host
+}
 $probe = Join-Path $PSScriptRoot 'probe_opencl_startup.ps1'
 $probeArgs = @{InstallDirectory=$InstallDirectory; NativeBuildDirectory=$BuildDirectory; Transcribe=$true; Draft=$true}
+if ($HtpAudioOpsDirectory) {
+    $probeArgs.AudioBackend = 'hexagon'
+    $probeArgs.HexagonOpsDirectory = $HtpAudioOpsDirectory
+    $probeArgs.Backend = 'opencl'
+    $probeArgs.DraftBackend = 'opencl'
+    # The QNN result supplies host-side Target features. Give the GPU control the same feature path.
+    $probeArgs.HostDraftFeatures = $true
+}
+
+function Confirm-HtpAudio($Name, $Lines, $Metrics) {
+    $models = @(foreach ($line in $Lines) {
+        if ($line -match 'llama_prepare_model_devices: using device (\S+) ') { $Matches[1] }
+    })
+    if (($models -join ',') -ne 'GPUOpenCL,GPUOpenCL' -or !($Lines -match 'mtmd_backends: using HTP0 backend')) {
+        throw "$Name did not load GPU Target/Draft and HTP audio: $($models -join ',')"
+    }
+    if ($Metrics.audio_encoder_htp_events -le 0 -or $Metrics.audio_encoder_us -le 0 -or
+        $Metrics.audio_encoder_us -gt 1000 * $Metrics.wall_ms) { throw "$Name lacks request-scoped HTP encoder evidence." }
+    $Summary.Add(('{0} | HTP0 encoder {1:F1} ms, {2} events | GPUOpenCL Target/Draft' -f
+        $Name, ($Metrics.audio_encoder_us/1000), $Metrics.audio_encoder_htp_events))
+}
+
 $capture = Join-Path $LogDirectory 'live-calibration'
 $calibrationLog = Join-Path $LogDirectory 'live-calibration.txt'
 Write-Host '[voxt] Capturing the eight-position calibration batch.'
@@ -28,9 +56,17 @@ if (!($captureLines -match '^Transcription probe: PASS$') -or !($captureLines -m
     throw "No complete capture for QNN calibration. See $calibrationLog"
 }
 
+if ($HtpAudioOpsDirectory) {
+    $captureMetrics = Get-Content -Raw -Encoding UTF8 -LiteralPath "$calibrationLog.metrics.json" | ConvertFrom-Json
+    Confirm-HtpAudio 'Calibration' $captureLines $captureMetrics
+    if (!($captureLines -match '^Capture layers: 28 \|') -or !($captureLines -match '^Exit code: 0 \(0x00000000\)$')) {
+        throw "Expected 28 fresh calibration layers and a clean capture exit. See $calibrationLog"
+    }
+}
+
 function Invoke-LiveClip([string]$Name, [string]$Directory, [int]$WorkerId) {
     $path = Join-Path $LogDirectory "$Name.txt"
-    & $probe @probeArgs -MeasurePlacement:$PlacementMatrix -WorkerId $WorkerId -LiveVerifyDirectory $Directory -ReportPath $path -MetricsPath "$path.metrics.json" | Out-Host
+    & $probe @probeArgs -MeasurePlacement:$samplePlacement -WorkerId $WorkerId -LiveVerifyDirectory $Directory -ReportPath $path -MetricsPath "$path.metrics.json" | Out-Host
     $lines = @(Get-Content -Encoding UTF8 -LiteralPath $path)
     if (!($lines -match '^Transcription probe: PASS$') -or !($lines -match '^Exit code: 0 \(0x00000000\)$')) {
         $detail = @($lines -match 'live Target verification failed|Transcription probe: FAIL|Startup probe error|No ready event' |
@@ -44,7 +80,11 @@ function Invoke-LiveClip([string]$Name, [string]$Directory, [int]$WorkerId) {
     if ($m.finish -ne 'stop' -or $m.tokens -lt 1 -or !$m.ids.Count -or $m.wall_ms -le 0 -or !$m.rounds) {
         throw "$Name produced no complete DFlash token trace."
     }
-    if ($PlacementMatrix) {
+    if ($HtpAudioOpsDirectory) {
+        Confirm-HtpAudio $Name $lines $m
+        if ($m.proposed -lt 1) { throw "$Name did not propose any DFlash tokens." }
+    }
+    if ($samplePlacement) {
         if ($m.peak_private_bytes -le 0 -or $m.peak_working_bytes -le 0) { throw 'Missing request memory samples.' }
         if ($Directory) {
             $sent = 0L
@@ -73,6 +113,29 @@ function Invoke-LiveClip([string]$Name, [string]$Directory, [int]$WorkerId) {
         Rate = $m.tokens * 1000 / $m.wall_ms
         LiveRounds = [int]$m.live_rounds
     }
+}
+
+$trials = if ($samplePlacement) { 3 } else { 1 }
+$controlName = if ($HtpAudioOpsDirectory) { 'GPU verification with HTP audio' } else { 'All-GPU DFlash' }
+function Measure-GpuReference {
+    Write-Host "[voxt] Measuring $controlName."
+    $runs = @(for ($trial = 1; $trial -le $trials; $trial++) {
+        $name = if ($trial -eq 1) { 'live-gpu-dflash' } else { "live-gpu-dflash-$trial" }
+        $run = Invoke-LiveClip $name '' 0
+        if ($run.LiveRounds -ne 0) { throw "$name unexpectedly used live verification." }
+        $run
+    })
+    $sorted = @($runs | Sort-Object { $_.Rate })
+    $median = $sorted[[int][Math]::Floor($trials/2)]
+    $Summary.Add(('{0} | {1} tokens | {2:F0} ms | {3:F2} request tok/s' -f
+        $controlName, $median.Metrics.tokens, $median.Metrics.wall_ms, $median.Rate))
+    $sorted
+}
+
+if ($HtpAudioOpsDirectory) {
+    # Retain the same-audio control even when the worker cannot acquire the second HTP session.
+    $baselines = @(Measure-GpuReference)
+    if (!$python) { throw 'QNN Python environment from the device replay is required.' }
 }
 
 $workerDirectory = (New-Item -ItemType Directory -Path (Join-Path $LogDirectory 'live-qnn-worker')).FullName
@@ -112,12 +175,11 @@ try {
     $ready = Get-Content -Raw -LiteralPath (Join-Path $workerDirectory 'ready.json') | ConvertFrom-Json
     $Summary.Add("QNN verifier ready | history capacity $($ready.history_capacity) tokens | transport $($ready.transport)")
     $verifierId = [int]$ready.pid
-    if ($PlacementMatrix) {
+    if ($samplePlacement) {
         if ($verifierId -le 0) { throw 'Missing QNN verifier PID for request memory sampling.' }
         $Summary.Add("QNN memory sampling | verifier PID $verifierId | launcher PID $($worker.Id)")
     }
     Write-Host '[voxt] Measuring GPU + HTP DFlash.'
-    $trials = if ($PlacementMatrix) { 3 } else { 1 }
     $hybrids = @(for ($trial = 1; $trial -le $trials; $trial++) {
         $name = if ($trial -eq 1) { 'live-qnn-dflash' } else { "live-qnn-dflash-$trial" }
         $run = Invoke-LiveClip $name $workerDirectory $verifierId
@@ -140,20 +202,17 @@ $Summary.Add(('GPU + HTP DFlash | {0} tokens | {1:F0} ms | {2:F2} request tok/s 
     $hybrid.Metrics.tokens, $hybrid.Metrics.wall_ms, $hybrid.Rate, $hybrid.LiveRounds, $hybrid.Metrics.rounds, $profile.qaairt_execute_events, $trials))
 $groupEvents = @($profile.group_executes)
 $Summary.Add("QNN DSP executes per seven-layer group: $($groupEvents -join ', ')")
+if ($HtpAudioOpsDirectory -and $profile.qaairt_execute_events -ne ($groupEvents | Measure-Object -Sum).Sum) {
+    throw 'QNN aggregate execution count differs from the four subgraph profiles.'
+}
 if ($groupEvents.Count -ne 4 -or @($groupEvents | Where-Object { $_ -lt $totalRounds }).Count -or $hybrid.LiveRounds -lt 1 -or $hybrid.LiveRounds -gt $hybrid.Metrics.rounds -or $profile.rounds -ne $totalRounds -or $profile.qaairt_execute_events -lt $profile.rounds) {
     throw 'Missing device execution evidence for live Target verification.'
 }
-Write-Host '[voxt] Measuring the all-GPU DFlash reference.'
-$baselines = @(for ($trial = 1; $trial -le $trials; $trial++) {
-    $name = if ($trial -eq 1) { 'live-gpu-dflash' } else { "live-gpu-dflash-$trial" }
-    $run = Invoke-LiveClip $name '' 0
-    if ($run.LiveRounds -ne 0) { throw "$name unexpectedly used live verification." }
-    $run
-})
-$baseline = @($baselines | Sort-Object { $_.Rate })[[int][Math]::Floor($trials/2)]
-$Summary.Add(('All-GPU DFlash | {0} tokens | {1:F0} ms | {2:F2} request tok/s' -f
-    $baseline.Metrics.tokens, $baseline.Metrics.wall_ms, $baseline.Rate))
-if ($PlacementMatrix) {
+if (!$HtpAudioOpsDirectory) {
+    $baselines = @(Measure-GpuReference)
+}
+$baseline = $baselines[[int][Math]::Floor($trials/2)]
+if ($samplePlacement) {
     foreach ($run in @($baselines + $hybrids)) {
         if ($run.Metrics.text -cne $baseline.Metrics.text -or ($run.Metrics.ids -join ',') -ne ($baseline.Metrics.ids -join ',')) {
             throw 'GPU/QNN trials differ in transcript or token sequence.'
@@ -167,6 +226,7 @@ if ($PlacementMatrix) {
     }
 }
 if ($hybrid.Metrics.text -cne $baseline.Metrics.text -or ($hybrid.Metrics.ids -join ',') -ne ($baseline.Metrics.ids -join ',')) {
-    throw 'Live QNN transcript or generated token sequence differs from all-GPU DFlash.'
+    throw "Live QNN transcript or generated token sequence differs from $controlName."
 }
-$Summary.Add(('Live QNN | token sequence matched | hybrid / all-GPU request throughput {0:F2}x' -f ($hybrid.Rate / $baseline.Rate)))
+$controlLabel = if ($HtpAudioOpsDirectory) { 'GPU verifier (same HTP audio)' } else { 'all-GPU' }
+$Summary.Add(('Live QNN | token sequence matched | hybrid / {0} request throughput {1:F2}x' -f $controlLabel, ($hybrid.Rate / $baseline.Rate)))

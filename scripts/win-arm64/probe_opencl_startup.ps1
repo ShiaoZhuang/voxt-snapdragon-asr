@@ -14,7 +14,8 @@ param(
     [ValidateSet('opencl','hexagon')][string]$AudioBackend,
     [int]$WorkerId,
     [switch]$MeasurePlacement,
-    [string]$HexagonOpsDirectory
+    [string]$HexagonOpsDirectory,
+    [switch]$HostDraftFeatures
 )
 
 $ErrorActionPreference = 'Stop'
@@ -167,7 +168,8 @@ function Invoke-ClipProbe([int]$Port, [string]$Audio) {
             $start.EnvironmentVariables['VOXT_ASR_TRACE'] = '1'
             $start.EnvironmentVariables['OMNI_DFLASH_PROFILE'] = '1'
         }
-        foreach ($key in @('VOXT_QNN_VERIFY_DIR','VOXT_QNN_VERIFY_PORT','VOXT_QNN_VERIFY_TOKEN')) {
+        foreach ($key in @('VOXT_QNN_VERIFY_DIR','VOXT_QNN_VERIFY_PORT','VOXT_QNN_VERIFY_TOKEN',
+                           'VOXT_VERIFY_CAPTURE_DIR','VOXT_VERIFY_CAPTURE_ALL_LAYERS')) {
             $start.EnvironmentVariables.Remove($key)
         }
         if ($LiveVerifyDirectory) {
@@ -177,8 +179,8 @@ function Invoke-ClipProbe([int]$Port, [string]$Audio) {
             $start.EnvironmentVariables['VOXT_QNN_VERIFY_PORT'] = [string]$worker.port
             $start.EnvironmentVariables['VOXT_QNN_VERIFY_TOKEN'] = $worker.token
             $start.EnvironmentVariables['VOXT_QNN_VERIFY_DIR'] = $LiveVerifyDirectory
-            $start.EnvironmentVariables['LLAMA_DFLASH_DEV'] = '0'
         }
+        if ($LiveVerifyDirectory -or $HostDraftFeatures) { $start.EnvironmentVariables['LLAMA_DFLASH_DEV'] = '0' }
         if ($CaptureDirectory) { $start.EnvironmentVariables['VOXT_VERIFY_CAPTURE_DIR'] = $CaptureDirectory }
         if ($CaptureAllLayers) { $start.EnvironmentVariables['VOXT_VERIFY_CAPTURE_ALL_LAYERS'] = '1' }
         $child = [Diagnostics.Process]::Start($start)
