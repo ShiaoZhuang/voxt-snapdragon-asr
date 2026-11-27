@@ -18,10 +18,8 @@ import onnxruntime as ort
 
 from prepare_decoder_layer import normalize, prepare, rotary_tables_for_positions
 from projection import QNN_PROVIDER, htp_execute_events, htp_session_options
+from qnn_reply import AUX_LAYERS, LAYERS, ROWS, VOCAB, WIDTH, PackedReply, legacy_chunks, send_reply
 from replay_target import read_head, write_json
-
-
-LAYERS, ROWS, WIDTH, VOCAB = 28, 8, 2048, 151936
 
 
 def calibrate(target, aux, capture, model_path, layers, *, cpu_test=False):
@@ -94,7 +92,7 @@ def decode_request(packet, history_capacity, embedding, rope):
     return feeds
 
 
-def verify_round(feeds, sessions, aux, norm, epsilon, weights, round_number):
+def verify_round(feeds, sessions, aux, norm, epsilon, weights, round_number, pack=legacy_chunks):
     names = [f"L{i}_{kind}" for i in range(LAYERS) for kind in ("K", "V")] + [
         f"hidden_{i}" for i in aux + [LAYERS]]
     start = time.perf_counter()
@@ -109,13 +107,10 @@ def verify_round(feeds, sessions, aux, norm, epsilon, weights, round_number):
     logits = normalize(values[-1].astype(np.float32), norm, epsilon) @ weights.T
     if any(not np.isfinite(x).all() for x in [*values, logits]):
         raise ValueError("nonfinite live verifier output")
-    chunks = [kv.swapaxes(1, 2).astype("<f2", copy=False).tobytes() for kv in values[:LAYERS * 2]]
-    chunks.extend(hidden.astype("<f4").tobytes() for hidden in values[LAYERS * 2:-1])
-    chunks.append(logits.astype("<f4", copy=False).tobytes())
-    return chunks
+    return pack(values[:LAYERS * 2], values[LAYERS * 2:-1], logits)
 
 
-def serve(args):
+def serve(args, *, packed_reply=False):
     folder = args.directory
     folder.mkdir(parents=True, exist_ok=True)
     target = gguf.GGUFReader(args.target)
@@ -124,7 +119,7 @@ def serve(args):
     weights = gguf.dequantize(head.data, head.tensor_type)
     rope = json.loads((args.capture / "attention.json").read_text())["rope"]
     aux = list(gguf.GGUFReader(args.draft).get_field("dflash.target_layers").contents())
-    if aux != [2, 14, 25]:
+    if tuple(aux) != AUX_LAYERS:
         raise ValueError(f"unsupported DFlash auxiliary layers: {aux}")
     sessions = []
     capacity = None
@@ -152,6 +147,7 @@ def serve(args):
         sessions.append((session, run_options, layers.stop))
         print(f"Ready layers {start_layer + 1}-{layers.stop}/{LAYERS}", flush=True)
     count = 0
+    pack = PackedReply().chunks if packed_reply else legacy_chunks
     token = secrets.token_hex(16)
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
@@ -188,13 +184,11 @@ def serve(args):
                         feeds = decode_request(packet, capacity, embedding, rope)
                         del packet
                         stage = "execute verifier"
-                        chunks = verify_round(feeds, sessions, aux, norm, epsilon, weights, count + 1)
+                        chunks = verify_round(feeds, sessions, aux, norm, epsilon, weights, count + 1, pack)
                         del feeds
                         stage = "send reply"
-                        client.sendall(struct.pack("!I", sum(map(len, chunks))))
-                        for chunk in chunks:
-                            client.sendall(chunk)
-                        del chunk, chunks
+                        send_reply(client, chunks)
+                        del chunks
                         count += 1
                     except Exception as error:
                         message = f"round {count + 1}, {stage}: {error}"
@@ -212,9 +206,10 @@ def main():
     for arg in ("target", "draft", "capture", "directory"):
         parser.add_argument(f"--{arg}", type=Path, required=True)
     parser.add_argument("--cpu-test", action="store_true", help="developer test, never reports HTP execution")
+    parser.add_argument("--packed-reply", action="store_true", help="reuse a KV/aux buffer and send logits directly")
     args = parser.parse_args()
     try:
-        serve(args)
+        serve(args, packed_reply=args.packed_reply)
     except Exception as error:
         write_json(args.directory / "error.json", {"error": str(error)})
         raise

@@ -17,9 +17,18 @@ if ($LASTEXITCODE -eq 0) { git restore --source=FETCH_HEAD -- scripts/win-arm64/
 
 启动器会显示正在运行的阶段、错误和每 30 秒的等待提示。验证阶段超过 35 分钟会退出并保留已有报告。可用 `-Route QnnLive` 单独跑混合转录对照，或用 `-Route GgmlHexagon` 单独跑 GGML。
 
-固定入口默认运行 Explore，首先执行 GPU 与 HTP 的混合放置测试（Hetero）。音频在 HTP，固定 Q4 草稿，比较 Target 与草稿在 HTP/HTP、GPU/HTP、GPU/GPU 和 HTP/GPU 四种放置，使用中文短句和 95 秒长音频，报告转录、吞吐和设备证据。已拉取的旧启动器直接无参运行即可获取当前实验。若要指定实验且本地启动器尚未更新，可在 PowerShell 设置 `$env:VOXT_VERIFY_ROUTE` 为实验名，再运行固定入口；删除该变量后恢复当前默认。
+固定入口默认运行 Explore。736e7af 实机已完成的 Hetero、Wait、Fusion、Dispatch、QnnHtpAudio 和 HtpSuite 已退出自动队列。即使归档已移走也不会重新调度这些整套实验。保留两次全 HTP 原始 JSONL 的机器会离线对比 3a82b3f 与 736e7af 的长音频耗时，并把完整对照写入本次日志中的 `historical-htp-comparison.txt`。
 
-同一次调用随后用 LongPair 复核 104 秒 long-all 的音频编码和总耗时：按 Target、DFlash、DFlash、Target 顺序启动四个服务，每个先用同一条长音频预热，再计时一次；另做一次 HTP 执行记录。然后依次测试 FastRPC 等待或轮询（Wait）、现有 DSP 融合和新的音频位置广播（Fusion）、每组最多 8 或 2048 个 DSP 算子（Dispatch）、HTP 音频搭配 GPU 或 QNN 八位置验证（QnnHtpAudio），最后执行 HtpSuite。每项保留原始记录，末尾的 VOXT SNAPDRAGON REPORT 汇总主要数据。某项失败后继续其余独立实验。如果达到启动器的 35 分钟上限，再运行同一命令会跳过本机同一提交与 DSP 库下已通过的项目，优先执行尚未开始的项目。本版读取本机 3a82b3f 的 HtpSuite 原始记录，汇总编码时间和请求时间三次测量的范围，跳过已通过的旧基准。3227849 单独通过的混合矩阵同样列为历史结果。旧基准需有对应的签名 DSP 版本和成功报告。显式指定实验名可以单独重测。QNN 组和配对的 GPU 验证组均开启设备事件采样，各运行三次新服务请求，两者的 TPS 应在这一组内比较。
+本轮依次运行以下项目。各项目计时串行。之前已通过 LongPair 的机器跳过该项；后续重复执行固定命令也会跳过本机相同试验版本和 DSP 库的成功项。到达 35 分钟启动器时限或手动中断后，再执行同一命令即可继续。新候选的配对测量会在相同条件下运行对照。可以在新 PowerShell 的仓库根目录无参执行。需要单独运行某项时，可设置 `$env:VOXT_VERIFY_ROUTE` 为实验名并执行原命令。
+
+| 实验 | 骁龙本运行的工作 |
+|---|---|
+| LongPair | 用 104 秒 long-all 对照全 HTP Target-only 与 Q4 DFlash，每个独立服务用同一音频预热，交换测试顺序。 |
+| QnnReply | 读取旧 QnnHtpAudio 的 28 层校准捕获，轮换比较原始分块回包与复用缓冲区的合并回包。报告字节一致性、打包及 TCP 回环接收耗时。该计时仅覆盖回包。 |
+| Queue | 固定每批最多 2048 个算子、融合开、阻塞等待。先测实际在途批次，队列满 8 则试 16，否则缩到观察到的峰值。记录共享队列大小、CPU 时间和同一短句的端到端耗时。 |
+| ConvLayout | 在同一份签名 v73 库上比较原有音频卷积布局和减少中间重排的新布局，记录短句与长中文的编码和整请求耗时、实际设备证据与输出一致性。 |
+
+成功和失败详情在各项目子目录；最终照片请包含 `VOXT SNAPDRAGON REPORT` 中的新实验结果。历史实验仍可按路由名称显式重测。
 
 选择 `HtpSuite` 可运行全 HTP 的长短音频对照。`zh-plain-1`、`en-3`、`mix-1`、`long-zh` 和 `long-all` 使用评测集给定的语言，长音频按原清单拼接并作为单条请求提交。两种配置都让音频编码和 Target 使用 HTP，其中一种还让 HTP 运行 Q4 草稿。每个服务先转录一次中文短句，再轮换样本，每条测三次。首次请求和模型启动单独报告。用于主表的请求关闭逐算子 DSP profiling，同一配置还用开关 profiling 的热短句核对采样成本与输出。另以 Q4 草稿在两条长音频上对照 512 和 1024 的物理预填充批次。所有模式逐条对照完整 token 和文本。
 

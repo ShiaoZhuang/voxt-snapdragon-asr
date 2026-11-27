@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [string]$InstallDirectory,
-    [ValidateSet('Explore', 'Hetero', 'LongPair', 'Fusion', 'Dispatch', 'Wait', 'QnnHtpAudio', 'HtpSuite', 'AudioEncoder', 'All', 'QnnLive', 'GgmlHexagon')][string]$Route = 'Explore'
+    [ValidateSet('Explore', 'Hetero', 'Queue', 'QnnReply', 'ConvLayout', 'LongPair', 'Fusion', 'Dispatch', 'Wait', 'QnnHtpAudio', 'HtpSuite', 'AudioEncoder', 'All', 'QnnLive', 'GgmlHexagon')][string]$Route = 'Explore'
 )
 
 $ErrorActionPreference = 'Stop'

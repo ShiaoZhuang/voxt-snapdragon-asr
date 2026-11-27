@@ -2,7 +2,7 @@
 param(
     [switch]$PlacementMatrix,
     [switch]$HtpSuite,
-    [ValidateSet('Explore', 'Hetero', 'LongPair', 'Fusion', 'Dispatch', 'Wait', 'QnnHtpAudio', 'HtpSuite')][string]$Study,
+    [ValidateSet('Explore', 'Hetero', 'Queue', 'QnnReply', 'ConvLayout', 'LongPair', 'Fusion', 'Dispatch', 'Wait', 'QnnHtpAudio', 'HtpSuite')][string]$Study,
     [switch]$AudioComparison,
     [Parameter(Mandatory)][string]$InstallDirectory,
     [Parameter(Mandatory)][string]$BuildDirectory,

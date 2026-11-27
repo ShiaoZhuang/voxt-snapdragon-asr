@@ -72,7 +72,8 @@ def server(args, draft, profile, ubatch, log, *, target_backend="hexagon", draft
     env = dict(os.environ, VOXT_ASR_TRACE="1", OMNI_DFLASH_PROFILE="1", GGML_HEXAGON_DEVICES="HTP0",
                GGML_HEXAGON_LIBHTP_DIR=str(args.ops), GGML_HEXAGON_PROFILE=str(int(profile)),
                GGML_HEXAGON_OPPOLL="0", GGML_HEXAGON_OPBATCH="2048", GGML_HEXAGON_OPFUSION="1",
-               VOXT_AUDIO_POS_BROADCAST="0", LLAMA_ARG_LOG_VERBOSITY="5", LLAMA_ARG_UBATCH=str(ubatch), LLAMA_ARG_BATCH="2048")
+               VOXT_AUDIO_POS_BROADCAST="0", VOXT_AUDIO_CONV_LAYOUT="0", GGML_HEXAGON_OPQUEUE="8",
+               LLAMA_ARG_LOG_VERBOSITY="5", LLAMA_ARG_UBATCH=str(ubatch), LLAMA_ARG_BATCH="2048")
     for key in ("VOXT_QNN_VERIFY_DIR", "VOXT_QNN_VERIFY_PORT", "VOXT_QNN_VERIFY_TOKEN",
                 "VOXT_VERIFY_CAPTURE_DIR", "VOXT_VERIFY_CAPTURE_ALL_LAYERS"):
         env.pop(key, None)

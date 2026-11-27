@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
     [switch]$PlacementMatrix,
+    [switch]$PackedReply,
     [string]$HtpAudioOpsDirectory,
     [Parameter(Mandatory)][string]$InstallDirectory,
     [Parameter(Mandatory)][string]$BuildDirectory,
@@ -146,6 +147,10 @@ $workerScript = Join-Path $PSScriptRoot '../../tools/qnn-probe/live_verify.py'
 $models = Join-Path $InstallDirectory 'models'
 $arguments = @('-X', 'utf8', $workerScript, '--target', (Join-Path $models 'target.gguf'),
     '--draft', (Join-Path $models 'draft-4.gguf'), '--capture', $capture, '--directory', $workerDirectory)
+if ($PackedReply) {
+    $arguments += '--packed-reply'
+    $Summary.Add('QNN worker | packed loopback-v1 reply')
+}
 $quoted = ($arguments | ForEach-Object { '"' + $_ + '"' }) -join ' '
 $processArgs = @{
     FilePath=$python; ArgumentList=$quoted; NoNewWindow=$true; PassThru=$true

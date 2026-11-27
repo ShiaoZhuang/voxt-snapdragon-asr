@@ -10,7 +10,7 @@ CLIPS = ("long-zh", "long-all")
 CONFIGS = {"target-ub512-profile0": "target", "dflash-ub512-profile0": "dflash"}
 
 
-def summarize(path):
+def read_groups(path):
     groups = {(clip, mode): {} for clip in CLIPS for mode in CONFIGS.values()}
     outputs = {}
     with path.open(encoding="utf-8-sig") as src:
@@ -32,6 +32,7 @@ def summarize(path):
                     raise ValueError("invalid encoder/request timing")
                 seq = (meta["token_ids"], r["text"])
                 if (meta["finish_reason"] != "stop" or not isinstance(seq[0], list) or not seq[0]
+                        or any(type(token) is not int for token in seq[0])
                         or not isinstance(seq[1], str) or not seq[1] or seq != outputs.setdefault(clip, seq)):
                     raise ValueError(f"incomplete or different output for {clip}")
                 if mode == "dflash":
@@ -40,16 +41,22 @@ def summarize(path):
                         raise ValueError("invalid draft counts")
                 group[rep] = r
             except (KeyError, TypeError, ValueError, OverflowError) as exc:
-                raise ValueError(f"line {number}: {exc}") from exc
+                raise ValueError(f"{path}, line {number}: {exc}") from exc
 
+    for (clip, mode), rows in groups.items():
+        if len(rows) != 3:
+            raise ValueError(f"{path}, {clip}/{mode}: need repeats 1,2,3, found {sorted(rows)}")
+    return groups
+
+
+def summarize(path):
+    groups = read_groups(path)
     lines = ["Warm ubatch=512, profiling off. Independent medians [min,max] in ms, n=3 per mode.",
              "Order: target / dflash. Deltas subtract unpaired medians (dflash - target)."]
     for clip in CLIPS:
         summaries = []
         for mode in ("target", "dflash"):
             rows = groups[clip, mode]
-            if len(rows) != 3:
-                raise ValueError(f"{clip}/{mode}: need repeats 1,2,3, found {sorted(rows)}")
             summaries.append({k: sorted(row[k] for row in rows.values())
                               for k in ("ms", "encoder_ms", "generation_ms")})
         t, d = summaries
@@ -68,11 +75,41 @@ def summarize(path):
     return lines
 
 
+def compare(path, new_path):
+    archives = (read_groups(path), read_groups(new_path))
+    lines = ["Old -> new, independent medians of 3 warm requests per mode (ms). "
+             "Ratios are old/new elapsed time; above 1x is faster. ubatch=512, profiling off."]
+    for clip in CLIPS:
+        # Historical JSONL includes the clip metadata and outputs, but no WAV digest.
+        identity = None
+        for archive in archives:
+            for mode in CONFIGS.values():
+                for row in archive[clip, mode].values():
+                    duration, lang, reference = (row.get(key) for key in ("duration", "language", "reference"))
+                    if (type(duration) not in (int, float) or not math.isfinite(duration) or duration <= 0
+                            or not isinstance(lang, str) or not lang or not isinstance(reference, str) or not reference):
+                        raise ValueError(f"{clip}: missing or invalid recorded clip metadata")
+                    current = (duration, lang, reference, row["meta"]["token_ids"], row["text"])
+                    if identity is None:
+                        identity = current
+                    elif current != identity:
+                        raise ValueError(f"{clip}: different clip metadata or generated tokens/text across archives")
+        for mode in CONFIGS.values():
+            parts = []
+            for key, label in (("ms", "wall"), ("encoder_ms", "encoder"), ("generation_ms", "generation")):
+                old, new = (median(r[key] for r in g[clip, mode].values()) for g in archives)
+                ratio = f"{old/new:.2f}x" if new else "n/a"
+                parts.append(f"{label} {old:.1f}->{new:.1f} ({ratio})")
+            lines.append(f"{clip}/{mode}: " + " | ".join(parts))
+    return lines
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--path", type=Path, required=True)
+    parser.add_argument("--compare", type=Path, help="newer htp-suite.jsonl for comparison")
     args = parser.parse_args()
     try:
-        print("\n".join(summarize(args.path)))
+        print("\n".join(compare(args.path, args.compare) if args.compare else summarize(args.path)))
     except (OSError, ValueError) as exc:
         parser.exit(1, f"INCOMPLETE: {exc}\n")
