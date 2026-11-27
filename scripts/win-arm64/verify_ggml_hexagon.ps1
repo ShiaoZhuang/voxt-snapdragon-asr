@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
     [switch]$PlacementMatrix,
+    [switch]$HtpSuite,
     [switch]$AudioComparison,
     [Parameter(Mandatory)][string]$InstallDirectory,
     [Parameter(Mandatory)][string]$BuildDirectory,
@@ -8,7 +9,8 @@ param(
     [Parameter(Mandatory)][AllowEmptyCollection()][System.Collections.Generic.List[string]]$Summary
 )
 $ErrorActionPreference = 'Stop'
-if ($AudioComparison) { $Summary.Add('Audio encoder placement | zh-plain-1 | same GGML build | 3 requests per configuration') }
+if ($HtpSuite) { $Summary.Add('All-HTP short and long ASR | Target-only and Q4 DFlash') }
+elseif ($AudioComparison) { $Summary.Add('Audio encoder placement | zh-plain-1 | same GGML build | 3 requests per configuration') }
 elseif ($PlacementMatrix) { $Summary.Add('GGML placement | zh-plain-1 | audio on Adreno | GPU and HTP0 Target/Draft') }
 else { $Summary.Add('GGML Hexagon | zh-plain-1 | target on HTP0, audio and optional Q4 draft on Adreno') }
 try {
@@ -119,6 +121,17 @@ foreach ($run in $previousRuns) {
         $Summary.Add("Previous same server/SO/CAT ($($run.Name)): trust $($prior.trust) | HTP0 $($prior.target)")
         break
     }
+}
+
+if ($HtpSuite) {
+    $resultPath = Join-Path $LogDirectory 'htp-suite-summary.txt'
+    & python -u (Join-Path $PSScriptRoot 'measure_htp_suite.py') --server (Join-Path $product 'bin/qwen3_asr_server.exe') --assets $InstallDirectory --ops $ops --logs $LogDirectory | Out-Host
+    $status = $LASTEXITCODE
+    if (Test-Path -LiteralPath $resultPath) {
+        foreach ($line in (Get-Content -Encoding UTF8 -LiteralPath $resultPath)) { $Summary.Add($line) }
+    }
+    if ($status -ne 0) { throw "HTP suite failed (exit $status); see $LogDirectory." }
+    return
 }
 
 if ($PlacementMatrix -or $AudioComparison) {

@@ -83,6 +83,9 @@ static json voxt_done(server_task_result_cmpl_final & final, const llama_vocab *
                {"proposed_draft_token_count", stats.n_draft_tokens},
                {"accepted_draft_token_count", stats.n_draft_accepted}};
         if (voxt_trace_enabled()) {
+            gen["prompt_positions"] = stats.n_prompt_processed;
+            gen["slot_prompt_ms"] = stats.t_prompt_ms();
+            gen["slot_generation_ms"] = stats.t_gen_ms();
             gen["audio_encoder_us"] = stats.voxt_audio_microseconds;
             gen["audio_encoder_htp_events"] = stats.voxt_audio_htp_events;
             gen["token_ids"] = generated_ids;
@@ -103,6 +106,7 @@ server_http_res_ptr server_routes::voxt_transcriptions(const server_http_req & r
     const auto * vocab = ctx_server.vocab;
     bool metadata = false;
     bool stream = false;
+    int64_t prepare_us = 0;
     std::string lang;
     try {
         const auto file = req.files.find("file");
@@ -137,7 +141,9 @@ server_http_res_ptr server_routes::voxt_transcriptions(const server_http_req & r
 
         server_task task(SERVER_TASK_TYPE_COMPLETION);
         task.id = response->rd.get_new_id();
+        const auto prepare_start = ggml_time_us();
         task.tokens = process_mtmd_prompt(ctx_server.mctx, prompt, {file->second.data}, ctx_server.init_opt);
+        prepare_us = ggml_time_us() - prepare_start;
         task.params = server_schema::eval_llama_cmpl_schema(
             vocab, params, meta->logit_bias_eog,
             {{"n_predict", voxt_budget(fields, media.duration)}, {"temperature", 0}, {"cache_prompt", false},
@@ -168,7 +174,7 @@ server_http_res_ptr server_routes::voxt_transcriptions(const server_http_req & r
     response->content_type = "text/event-stream";
     response->headers["Cache-Control"] = "no-cache";
     response->status = 200;
-    response->set_next([res = response.get(), vocab, lang, metadata, &stopping](std::string & output) {
+    response->set_next([res = response.get(), vocab, lang, metadata, prepare_us, &stopping](std::string & output) {
         if (res->should_stop() || stopping.load() || !res->rd.has_next()) {
             return false;
         }
@@ -179,7 +185,11 @@ server_http_res_ptr server_routes::voxt_transcriptions(const server_http_req & r
             output = format_oai_sse({{"type", "error"}, {"error", {{"code", "transcription_failed"}}}});
         } else {
             auto & final = static_cast<server_task_result_cmpl_final &>(*result);
-            output = format_oai_sse(voxt_done(final, vocab, lang, metadata));
+            auto event = voxt_done(final, vocab, lang, metadata);
+            if (metadata && voxt_trace_enabled()) {
+                event["generation_metadata"]["input_prepare_ms"] = prepare_us / 1000.0;
+            }
+            output = format_oai_sse(event);
         }
         if (result) {
             output += "data: [DONE]\n\n";

@@ -17,7 +17,11 @@ if ($LASTEXITCODE -eq 0) { git restore --source=FETCH_HEAD -- scripts/win-arm64/
 
 启动器会显示正在运行的阶段、错误和每 30 秒的等待提示。验证阶段超过 35 分钟会退出并保留已有报告。可用 `-Route QnnLive` 单独跑混合转录对照，或用 `-Route GgmlHexagon` 单独跑 GGML。
 
-当前固定入口测音频编码占比。使用同一条 `zh-plain-1.wav`，以纯 OpenCL Target-only 为对照，分别在 HTP Target-only 和 HTP Target + HTP Q4 草稿上切换 Adreno / HTP 音频编码。五种配置各测三次，报告取请求 TPS 中位数对应的同一次测量，打印编码器毫秒数、占请求耗时的百分比、编码期间 HTP 算子数和端到端 TPS。服务在完成转录的响应中返回编码微秒数和编码窗口内 HTP0 的非零周期算子计数。编码计时覆盖音频编码器与投影，单独排除特征预处理与语言模型 prefill。原始逐次结果在日志目录的 `placement.csv`。请拍最后的 **VOXT SNAPDRAGON REPORT**。
+固定入口当前运行全 HTP 的长短音频对照。`zh-plain-1`、`en-3`、`mix-1`、`long-zh` 和 `long-all` 使用评测集给定的语言，长音频按原清单拼接并作为单条请求提交。两种配置都让音频编码和 Target 使用 HTP，其中一种还让 HTP 运行 Q4 草稿。每个服务先转录一次中文短句，再轮换样本，每条测三次。首次请求和模型启动单独报告。用于主表的请求关闭逐算子 DSP profiling，同一配置还用开关 profiling 的热短句核对采样成本与输出。另以 Q4 草稿在两条长音频上对照 512 和 1024 的物理预填充批次。所有模式逐条对照完整 token 和文本。
+
+报告列出端到端 tok/s、请求耗时与音频时长之比（RTF）以及原始混合错误率（编辑数除以参考单位数，汉字逐字、英语按词、忽略标点与大小写，保留口头语）。该口径与 31 条基准的数字和口头语归一化口径不同。输入准备包括 WAV 解码、特征和提示构造；剩余 prompt 耗时是 slot 的 prompt 总耗时减编码，包含调度。Draft、验证、草稿上下文是生成阶段内的计时。DSP 热点百分比以已记录算子的设备耗时之和为分母。逐次请求、转录、参考、token、阶段计时与计数保存在 `htp-suite.jsonl`，各配置另存 stderr。请拍最后的 **VOXT SNAPDRAGON REPORT**。
+
+使用新版启动器选择 `-Route AudioEncoder` 可重新测音频编码占比。使用同一条 `zh-plain-1.wav`，以纯 OpenCL Target-only 为对照，分别在 HTP Target-only 和 HTP Target + HTP Q4 草稿上切换 Adreno / HTP 音频编码。五种配置各测三次，报告取请求 TPS 中位数对应的同一次测量，打印编码器毫秒数、占请求耗时的百分比、编码期间 HTP 算子数和端到端 TPS。服务在完成转录的响应中返回编码微秒数和编码窗口内 HTP0 的非零周期算子计数。编码计时覆盖音频编码器与投影，单独排除特征预处理与语言模型 prefill。原始逐次结果在日志目录的 `placement.csv`。请拍最后的 **VOXT SNAPDRAGON REPORT**。
 
 更新本地启动器后，可用 `-Route All` 重新测完整 Target/Draft 组合及 QNN 八位置验证。QNN 当前只接入满八位置的验证，完整 QNN Target-only 尚无实测。
 
