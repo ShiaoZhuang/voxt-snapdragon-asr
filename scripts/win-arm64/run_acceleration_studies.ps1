@@ -10,6 +10,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $studies = [ordered]@{
     Hetero = @('measure_hetero_suite.py', 'hetero-suite-summary.txt', '^long-zh HTP/HTP median')
+    LongPair = @('measure_htp_long_pair.py', 'htp-long-pair-summary.txt', '^Phase values|^[1-4] .* steady |^Launches .* steady |^Independent long-all')
     Wait = @('measure_htp_wait.py', 'htp-wait-summary.txt', 'wait/poll \| median wall')
     Fusion = @('measure_htp_fusion.py', 'htp-fusion-summary.txt', 'warm median request')
     Dispatch = @('measure_htp_dispatch.py', 'htp-dispatch-summary.txt', '^Warm request median')
@@ -22,7 +23,16 @@ $server = Join-Path $Product 'bin/qwen3_asr_server.exe'
 $revision = git -C $PSScriptRoot rev-parse HEAD
 if ($LASTEXITCODE -ne 0 -or $revision -notmatch '^[a-f0-9]{40}$') { throw 'Cannot identify experiment revision.' }
 $dsp = (Get-FileHash -LiteralPath (Join-Path $Ops 'libggml-htp-v73.so')).Hash
+# The release immediately following 736e7af only extends orchestration and adds
+# LongPair. All pre-existing experiments use the same code and binary inputs.
+$oldRelease = '736e7aff4e2e24d036733aa4eb9ee987d0144b6c'
+$parentRevision = git -C $PSScriptRoot rev-parse "HEAD^"
+$acceptPrevious = $parentRevision -eq $oldRelease
 $key = "$revision-$dsp"
+$lockFile = Join-Path $PSScriptRoot '../../sources.lock.json'
+$release = (Get-Content -Raw -LiteralPath $lockFile | ConvertFrom-Json).geniex_htp
+$official = $release.files.'libggml-htp-v73.so' -eq $dsp
+
 $previous = @(Get-ChildItem -LiteralPath (Split-Path -Parent $LogDirectory) -Directory | Where-Object { $_.FullName -ne $LogDirectory } | Sort-Object Name -Descending)
 function Get-Highlights([string]$Name, [string]$Path, [string]$Pattern) {
     if (!(Test-Path -LiteralPath $Path)) { return }
@@ -43,23 +53,42 @@ $pending = @()
 $retry = @()
 foreach ($name in $studies.Keys) {
     if (!$auto -and $name -ne $Study) { continue }
+    $keys = @($key)
+    if ($acceptPrevious -and $name -ne 'LongPair') { $keys += "$oldRelease-$dsp" }
     $seen = $false
     $done = $null
     if ($auto) {
         foreach ($run in $previous) {
             $marker = Join-Path $run.FullName "$name-started.txt"
-            if ((Test-Path -LiteralPath $marker) -and (Get-Content -LiteralPath $marker -TotalCount 1) -eq $key) {
+            if ((Test-Path -LiteralPath $marker) -and (Get-Content -LiteralPath $marker -TotalCount 1) -in $keys) {
                 $seen = $true
                 $pass = Join-Path $run.FullName "$name-pass.txt"
-                if ((Test-Path -LiteralPath $pass) -and (Get-Content -LiteralPath $pass -TotalCount 1) -eq $key) { $done = $run; break }
+                if ((Test-Path -LiteralPath $pass) -and (Get-Content -LiteralPath $pass -TotalCount 1) -in $keys) { $done = $run; break }
             }
-            # The first standalone matrix shipped before per-study checkpoints existed.
-            if ($name -eq 'Hetero') {
+            # Standalone baselines predate study markers. Keep them explicitly historical.
+            if (($revision -eq $oldRelease -or $acceptPrevious) -and $official -and $name -in 'Hetero','HtpSuite') {
                 $report = Join-Path $run.FullName 'handoff_report.txt'
-                $matrix = Join-Path $run.FullName 'hetero-suite-summary.txt'
-                if ((Test-Path -LiteralPath $matrix) -and (Test-Path -LiteralPath $report) -and
-                    (Select-String -LiteralPath $report -Pattern '^Commit: 3227849ed7b434286358cbf80f99e6694b3a690e$' -Quiet) -and
-                    (Select-String -LiteralPath $matrix -Pattern '^PASS \|' -Quiet)) { $done = $run; break }
+                $baseline = Join-Path $run.FullName $studies[$name][1]
+                if (!(Test-Path -LiteralPath $baseline) -or !(Test-Path -LiteralPath $report)) { continue }
+                $sha = if ($name -eq 'Hetero') { '3227849ed7b434286358cbf80f99e6694b3a690e' } else { '3a82b3fe279d7034e93b55cb2b94fd7889f222b0' }
+                $reportLines = @(Get-Content -LiteralPath $report -Encoding UTF8)
+                $baselineLines = @(Get-Content -LiteralPath $baseline -Encoding UTF8)
+                if ($reportLines -notcontains "Commit: $sha" -or $reportLines -notcontains 'Result: PASS | Stage: verify' -or
+                    $reportLines -notcontains "HTP package: official GenieX | v73 SO/CAT match $($release.version)" -or
+                    $baselineLines[-1] -notmatch '^PASS \|' -or ($baselineLines -match '^(FAIL|INCOMPLETE)')) { continue }
+                if ($name -eq 'HtpSuite') {
+                    $raw = Join-Path $run.FullName 'htp-suite.jsonl'
+                    if (!(Test-Path -LiteralPath $raw)) { continue }
+                    $analysis = @(& python (Join-Path $PSScriptRoot 'summarize_htp_baseline.py') --path $raw)
+                    if ($LASTEXITCODE -ne 0) {
+                        Write-Host "[voxt] Historical HtpSuite raw records did not validate in $($run.Name)."
+                        continue
+                    }
+                    $analysis | Set-Content -LiteralPath (Join-Path $LogDirectory 'historical-htp-baseline.txt') -Encoding UTF8
+                    foreach ($line in $analysis) { $Summary.Add($line) }
+                }
+                $done = $run
+                break
             }
         }
     }

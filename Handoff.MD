@@ -19,7 +19,7 @@ if ($LASTEXITCODE -eq 0) { git restore --source=FETCH_HEAD -- scripts/win-arm64/
 
 固定入口默认运行 Explore，首先执行 GPU 与 HTP 的混合放置测试（Hetero）。音频在 HTP，固定 Q4 草稿，比较 Target 与草稿在 HTP/HTP、GPU/HTP、GPU/GPU 和 HTP/GPU 四种放置，使用中文短句和 95 秒长音频，报告转录、吞吐和设备证据。已拉取的旧启动器直接无参运行即可获取当前实验。若要指定实验且本地启动器尚未更新，可在 PowerShell 设置 `$env:VOXT_VERIFY_ROUTE` 为实验名，再运行固定入口；删除该变量后恢复当前默认。
 
-同一次调用随后依次测试 FastRPC 等待或轮询（Wait）、现有 DSP 融合和新的音频位置广播（Fusion）、每组最多 8 或 2048 个 DSP 算子（Dispatch）、HTP 音频搭配 GPU 或 QNN 八位置验证（QnnHtpAudio），最后执行 HtpSuite。每项保留原始记录，末尾的 VOXT SNAPDRAGON REPORT 汇总主要数据。某项失败后继续其余独立实验。如果达到启动器的 35 分钟上限，再运行同一命令会跳过本机同一提交与 DSP 库下已通过的项目，优先执行尚未开始的项目。已在 3227849 单独通过的混合矩阵会列为历史结果。显式指定实验名可以单独重测。QNN 组和配对的 GPU 验证组均开启设备事件采样，各运行三次新服务请求，两者的 TPS 应在这一组内比较。
+同一次调用随后用 LongPair 复核 104 秒 long-all 的音频编码和总耗时：按 Target、DFlash、DFlash、Target 顺序启动四个服务，每个先用同一条长音频预热，再计时一次；另做一次 HTP 执行记录。然后依次测试 FastRPC 等待或轮询（Wait）、现有 DSP 融合和新的音频位置广播（Fusion）、每组最多 8 或 2048 个 DSP 算子（Dispatch）、HTP 音频搭配 GPU 或 QNN 八位置验证（QnnHtpAudio），最后执行 HtpSuite。每项保留原始记录，末尾的 VOXT SNAPDRAGON REPORT 汇总主要数据。某项失败后继续其余独立实验。如果达到启动器的 35 分钟上限，再运行同一命令会跳过本机同一提交与 DSP 库下已通过的项目，优先执行尚未开始的项目。本版读取本机 3a82b3f 的 HtpSuite 原始记录，汇总编码时间和请求时间三次测量的范围，跳过已通过的旧基准。3227849 单独通过的混合矩阵同样列为历史结果。旧基准需有对应的签名 DSP 版本和成功报告。显式指定实验名可以单独重测。QNN 组和配对的 GPU 验证组均开启设备事件采样，各运行三次新服务请求，两者的 TPS 应在这一组内比较。
 
 选择 `HtpSuite` 可运行全 HTP 的长短音频对照。`zh-plain-1`、`en-3`、`mix-1`、`long-zh` 和 `long-all` 使用评测集给定的语言，长音频按原清单拼接并作为单条请求提交。两种配置都让音频编码和 Target 使用 HTP，其中一种还让 HTP 运行 Q4 草稿。每个服务先转录一次中文短句，再轮换样本，每条测三次。首次请求和模型启动单独报告。用于主表的请求关闭逐算子 DSP profiling，同一配置还用开关 profiling 的热短句核对采样成本与输出。另以 Q4 草稿在两条长音频上对照 512 和 1024 的物理预填充批次。所有模式逐条对照完整 token 和文本。
 

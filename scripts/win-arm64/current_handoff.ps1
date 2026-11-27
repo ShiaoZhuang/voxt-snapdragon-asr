@@ -4,7 +4,7 @@ param(
     [Parameter(Mandatory)][string]$BuildDirectory,
     [Parameter(Mandatory)][string]$LogDirectory,
     [switch]$FullReplay,
-    [ValidateSet('Explore', 'Hetero', 'Fusion', 'Dispatch', 'Wait', 'QnnHtpAudio', 'HtpSuite', 'AudioEncoder', 'All', 'QnnLive', 'GgmlHexagon')][string]$Route = 'Explore'
+    [ValidateSet('Explore', 'Hetero', 'LongPair', 'Fusion', 'Dispatch', 'Wait', 'QnnHtpAudio', 'HtpSuite', 'AudioEncoder', 'All', 'QnnLive', 'GgmlHexagon')][string]$Route = 'Explore'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -23,7 +23,7 @@ foreach ($step in @(
     @{ Id='GgmlHexagon'; Name='GGML Hexagon'; Script='verify_ggml_hexagon.ps1' },
     @{ Id='QnnLive'; Name='QNN live'; Script='verify_live_qnn.ps1' }
 )) {
-    $audioTest = $Route -in 'Explore', 'Hetero', 'Fusion', 'Dispatch', 'Wait', 'QnnHtpAudio', 'HtpSuite', 'AudioEncoder' -and $step.Id -eq 'GgmlHexagon'
+    $audioTest = $Route -in 'Explore', 'Hetero', 'LongPair', 'Fusion', 'Dispatch', 'Wait', 'QnnHtpAudio', 'HtpSuite', 'AudioEncoder' -and $step.Id -eq 'GgmlHexagon'
     if (!$audioTest -and $Route -ne 'All' -and $Route -ne $step.Id) { continue }
     Write-Host "[voxt] Starting $($step.Name)."
     try {
