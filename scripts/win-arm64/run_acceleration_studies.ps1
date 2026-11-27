@@ -12,7 +12,7 @@ $studies = [ordered]@{
     Hetero = @('measure_hetero_suite.py', 'hetero-suite-summary.txt', '^long-zh HTP/HTP median')
     QnnReply = @('measure_qnn_reply.ps1', 'qnn-reply-summary.txt', '^QNN reply')
     Queue = @('measure_htp_queue.py', 'htp-queue-summary.txt', '^Queue candidate|^Queue depth|^Queue storage change|^Queue pair')
-    ConvLayout = @('measure_htp_conv_layout.py', 'htp-conv-layout-summary.txt', 'packed/view warm medians')
+    ConvLayout = @('measure_htp_conv_layout.py', 'htp-conv-layout-summary.txt', '^Rechecking both archived|^Archive unavailable|packed/view warm medians')
     LongPair = @('measure_htp_long_pair.py', 'htp-long-pair-summary.txt', '^Phase values|^[1-4] .* steady |^Launches .* steady |^Independent long-all')
     Wait = @('measure_htp_wait.py', 'htp-wait-summary.txt', 'wait/poll \| median wall')
     Fusion = @('measure_htp_fusion.py', 'htp-fusion-summary.txt', 'warm median request')
@@ -47,6 +47,27 @@ function Find-HtpArchive([string]$Revision, [string]$Subdirectory) {
         if ($lines -contains "Commit: $Revision" -and $lines -contains 'Result: PASS | Stage: verify' -and
             $lines -contains "HTP package: official GenieX | v73 SO/CAT match $($release.version)" -and
             (Get-Content -LiteralPath $summaryFile -Encoding UTF8 -Tail 1) -match '^PASS \|') { return $raw }
+    }
+}
+function Find-ConvProfileArchive {
+    # The 79c8ac8 run wrote all four profiled responses and both native traces
+    # before the original physical-shape comparison could fail.
+    $captureRevision = '79c8ac84411d437266bf0908e76e966668b5d4cb'
+    $repo = Join-Path $PSScriptRoot '../..'
+    & git -C $repo diff --quiet $captureRevision HEAD -- sources.lock.json patches native scripts/win-arm64/build_native.ps1 scripts/win-arm64/measure_htp_suite.py
+    if ($LASTEXITCODE -ne 0) { return }
+    foreach ($run in $previous) {
+        $report = Join-Path $run.FullName 'handoff_report.txt'
+        $started = Join-Path $run.FullName 'ConvLayout-started.txt'
+        if (!(Test-Path -LiteralPath $report) -or !(Test-Path -LiteralPath $started)) { continue }
+        if ((Get-Content -LiteralPath $started -TotalCount 1) -ne "ConvLayout-v1-$dsp") { continue }
+        $lines = @(Get-Content -LiteralPath $report -Encoding UTF8)
+        if ($lines -notcontains "Commit: $captureRevision" -or
+            $lines -notcontains "HTP package: official GenieX | v73 SO/CAT match $($release.version)" -or
+            !($lines -match 'HTP convolution output shapes or multiplicities differ')) { continue }
+        $dir = Join-Path $run.FullName 'ConvLayout'
+        if (!(Test-Path -LiteralPath $dir -PathType Container)) { $dir = $run.FullName }
+        return $dir
     }
 }
 if ($auto -and $official) {
@@ -119,7 +140,12 @@ foreach ($name in @($pending + $retry)) {
             & (Join-Path $PSScriptRoot $runner) -PreviousRuns $previous -LogDirectory $dir -Summary $notes
             if (!(Select-String -LiteralPath $result -Pattern '^PASS \|' -Quiet)) { throw "Missing PASS in $file" }
         } else {
-            & python -u (Join-Path $PSScriptRoot $runner) --server $server --assets $InstallDirectory --ops $Ops --logs $dir | Out-Host
+            $options = @()
+            if ($auto -and $official -and $name -eq 'ConvLayout') {
+                $archive = Find-ConvProfileArchive
+                if ($archive) { $options = @('--profile-archive', $archive) }
+            }
+            & python -u (Join-Path $PSScriptRoot $runner) --server $server --assets $InstallDirectory --ops $Ops @options --logs $dir | Out-Host
             if ($LASTEXITCODE -ne 0) { throw "exit $LASTEXITCODE" }
             if (!(Select-String -LiteralPath $result -Pattern '^PASS \|' -Quiet)) { throw "Missing PASS in $file" }
         }

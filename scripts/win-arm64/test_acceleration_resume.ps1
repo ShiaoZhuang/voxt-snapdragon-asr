@@ -26,6 +26,12 @@ Set-Content -LiteralPath (Join-Path $LogDirectory 'qnn-reply-summary.txt') 'PASS
     function python {
         $file = [IO.Path]::GetFileNameWithoutExtension($args[1])
         $dir = $args[-1]
+        if ($expectedArchive) {
+            $index = [Array]::IndexOf($args, '--profile-archive')
+            if ($file -ne 'measure_htp_conv_layout' -or $index -lt 0 -or $args[$index + 1] -ne $expectedArchive) {
+                throw "Expected only ConvLayout with matching archived evidence, got $args"
+            }
+        }
         if ($file -eq 'measure_htp_queue' -and $queueShouldFail) {
             $global:LASTEXITCODE = 1
             return
@@ -55,7 +61,20 @@ Set-Content -LiteralPath (Join-Path $LogDirectory 'qnn-reply-summary.txt') 'PASS
     if (Get-ChildItem -LiteralPath (Join-Path $runs '03') -Filter '*-started.txt') { throw 'Completed campaign reran' }
     Run '04' 'Hetero'
     if (!(Test-Path -LiteralPath (Join-Path $runs '04/Hetero-pass.txt'))) { throw 'Explicit historical route failed' }
-    Write-Output 'PASS | retired studies, historical LongPair, failure isolation, resume and explicit rerun'
+
+    # Match the 79c8ac8 laptop report. Simulate unchanged native build inputs.
+    function git { $global:LASTEXITCODE = 0 }
+    $old = Join-Path $runs '01'
+    Remove-Item -LiteralPath (Join-Path $old 'ConvLayout-pass.txt')
+    $expectedArchive = Join-Path $old 'ConvLayout'
+    Set-Content -LiteralPath (Join-Path $root 'sources.lock.json') -Value "{`"geniex_htp`":{`"version`":`"fixture`",`"files`":{`"libggml-htp-v73.so`":`"$hash`"}}}"
+    Set-Content -LiteralPath (Join-Path $old 'handoff_report.txt') -Value @(
+        'Commit: 79c8ac84411d437266bf0908e76e966668b5d4cb', 'HTP package: official GenieX | v73 SO/CAT match fixture',
+        'INCOMPLETE: zh-plain-1: HTP convolution output shapes or multiplicities differ'
+    )
+    Run '05' 'Explore'
+    if (!(Test-Path -LiteralPath (Join-Path $runs '05/ConvLayout-pass.txt'))) { throw 'Archived profile run did not pass' }
+    Write-Output 'PASS | retired studies, historical LongPair, failure isolation, resume, explicit rerun and archived profiles'
 } finally {
     if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force }
 }

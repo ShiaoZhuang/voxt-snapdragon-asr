@@ -28,6 +28,8 @@ if ($LASTEXITCODE -eq 0) { git restore --source=FETCH_HEAD -- scripts/win-arm64/
 | Queue | 固定每批最多 2048 个算子、融合开、阻塞等待。先测实际在途批次，队列满 8 则试 16，否则缩到观察到的峰值。记录共享队列大小、CPU 时间和同一短句的端到端耗时。 |
 | ConvLayout | 在同一份签名 v73 库上比较原有音频卷积布局和减少中间重排的新布局，记录短句与长中文的编码和整请求耗时、实际设备证据与输出一致性。 |
 
+如果上一轮在 `79c8ac8` 报 `HTP convolution output shapes or multiplicities differ`，直接运行固定入口。脚本优先读取那一轮的四条请求和两份原始 HTP 日志，从每层 IM2COL 恢复逻辑形状，再核对 GELU 实际执行的形状和步幅。看到 `Rechecking both archived HTP profiles` 表示已找到归档。若归档缺失，脚本会补采。两条音频各做四对新的热态计时，报告给出编码和端到端的配对速度比，超过 1 表示新布局更快。
+
 成功和失败详情在各项目子目录；最终照片请包含 `VOXT SNAPDRAGON REPORT` 中的新实验结果。历史实验仍可按路由名称显式重测。
 
 选择 `HtpSuite` 可运行全 HTP 的长短音频对照。`zh-plain-1`、`en-3`、`mix-1`、`long-zh` 和 `long-all` 使用评测集给定的语言，长音频按原清单拼接并作为单条请求提交。两种配置都让音频编码和 Target 使用 HTP，其中一种还让 HTP 运行 Q4 草稿。每个服务先转录一次中文短句，再轮换样本，每条测三次。首次请求和模型启动单独报告。用于主表的请求关闭逐算子 DSP profiling，同一配置还用开关 profiling 的热短句核对采样成本与输出。另以 Q4 草稿在两条长音频上对照 512 和 1024 的物理预填充批次。所有模式逐条对照完整 token 和文本。
